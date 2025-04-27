@@ -1,0 +1,26 @@
+Non-Exclusive, Non-Commercial Use License
+
+Institute of Biophysics, Chinese Academy of Sciences (IBP, CAS) agrees to provide to Non-Commercial Licensee a proprietary computer program known as CISRR (or CIS-RR) for modeling protein side-chain conformations. 
+
+   Accordingly, IBP and Licensee agree as follows:
+
+   1. Licensee agrees to acknowledge the authors of CISRR in any scientific publication of results based in part on the use of CISRR. Any published work which utilizes CISRR shall include the following reference:
+   "Yang Cao, Lin Song, Zhichao Miao, Yun Hu, Liqing Tian, Taijiao Jiang. Improved side-chain modeling by coupling clash-detection guided iterative search with rotamer relaxation. Bioinformatics, 2011 Mar 15;27(6):785-90"
+
+   2. IBP does not have the resources to offer technical support, although IBP would appreciate being notified of problems experienced by Licensee in using CISRR. Licensee may report technical problems by providing a brief description thereof in writing to the authors of CISRR.
+   
+   3. This computer program is provided "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+
+UNDERSTOOD AND AGREED.
+
+
+Contact Information:
+
+                              Taijiao Jiang, Ph.D. Principal investigator.
+                              Center for Computational and Systems Biology,
+                              Institute of Biophysics, CAS.
+                              Tel/FAX: 86-10-64888427
+                              Email: taijiao@aya.yale.edu or taijiao@moon.ibp.ac.cn 
+
+
