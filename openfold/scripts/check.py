@@ -86,6 +86,7 @@ class AmideBondFixer:
         structure = parser.get_structure("protein", protein)
         self.ori_structure = structure.copy()
         
+        deleted_residues_ids = []
         seqs = {}
         for model in structure:
             for chain in model:
@@ -117,6 +118,7 @@ class AmideBondFixer:
                                 print(f"CIS detected: Chain {chain_id}, Residues {prev_res.get_id()[1]}-{curr_res.get_id()[1]}, ω = {angle:.2f}°")
                         
                         residues_to_delete.append(((prev_res.get_id(), prev_res.get_resname()), (curr_res.get_id(), curr_res.get_resname())))
+                        deleted_residues_ids.extend([i, i + 1])
                         if verbose:
                             print(f"Non-planar detected: Chain {chain_id}, Residues {prev_res.get_id()[1]}-{curr_res.get_id()[1]}, ω = {angle:.2f}°")
                     except KeyError:
@@ -146,6 +148,7 @@ class AmideBondFixer:
                 "fixed_pdb_file": self.file_paths["broken_pdb"],
                 "fixed_fasta_file": self.file_paths["full_seqs"],
                 "residues_to_delete_dict": self.residues_to_delete_dict,
+                "deleted_residues_ids": list(set(deleted_residues_ids)),
             }
         
         return {}
@@ -226,21 +229,22 @@ class AmideBondFixer:
         返回:
             str: 处理后的PDB文件内容。
         """
-        self.calculate_omega_and_clean(self.pdb_string, verbose=True)
+        info = self.calculate_omega_and_clean(self.pdb_string, verbose=True)
         
         if self.residues_to_delete_dict:
+            print("Fixing PDB file...")
             self.fixer(self.file_paths["broken_pdb"], self.file_paths["full_seqs"])
             self.cisrr(self.file_paths["fixed_pdb"], self.residues_to_delete_dict)
             self.fill_bfactor_occupancy()
-            print("Checking final PDB file...")
-            self.calculate_omega_and_clean(self.file_paths["filled_pdb"], verbose=True)
+            # print("Checking final PDB file...")
+            # self.calculate_omega_and_clean(self.file_paths["filled_pdb"], verbose=True)
             print("Done.")
             
             for file_type in ["fixed_pdb", "broken_pdb", "full_seqs", "cisrr_pdb"]:
                 if os.path.exists(self.file_paths[file_type]):
                     os.remove(self.file_paths[file_type])
         else:
-            return None
+            return None, None
         
         with open(self.file_paths["filled_pdb"], "r") as f:
             pdb_string = f.read()
@@ -248,4 +252,4 @@ class AmideBondFixer:
         if os.path.exists(self.file_paths["filled_pdb"]):
             os.remove(self.file_paths["filled_pdb"])
         
-        return pdb_string
+        return pdb_string, info
