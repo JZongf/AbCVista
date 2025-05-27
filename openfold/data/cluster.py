@@ -7,6 +7,7 @@ from collections import defaultdict
 from kneed import KneeLocator
 from sklearn.neighbors import NearestNeighbors
 from sklearn.cluster import HDBSCAN, KMeans
+import re
 
 def read_fasta(fasta_file):
     """
@@ -259,7 +260,35 @@ def cosinner_similarity_cluster(
     selected_idx = select_representative_sequences(distance_matrix, labels, n=128)
     
     return selected_idx, label_to_index
-    
+
+
+def find_letter_sequence_region(sequence: str):
+    """
+    在给定的序列中查找主要英文字母块（可能包含内部连字符）的开始和结束位置。
+
+    Args:
+        sequence: 输入的字符串序列。
+
+    Returns:
+        一个元组 (start_index, end_index) 代表字母序列的开始和结束位置（包含）。
+        如果未找到字母序列，则返回 None。
+    """
+    # 正则表达式查找以大写字母开头和结尾，中间可以包含大写字母和连字符的序列
+    # [A-Z] 匹配一个大写字母
+    # (?: ... ) 非捕获组
+    # [A-Z-]* 匹配零个或多个大写字母或连字符
+    # [A-Z] 确保序列的中间部分（如果存在）以大写字母结尾，或者整个序列只有一个字母
+    # 这个表达式确保我们捕获的是一个连续的、以字母为边界的块
+    match = re.search(r'[A-Z](?:[A-Z-]*[A-Z])?', sequence)
+
+    if match:
+        start_pos = match.start()
+        # match.end() 返回的是匹配结束位置的下一个索引，所以要减1得到包含的结束位置
+        end_pos = match.end() - 1
+        return (start_pos, end_pos)
+    else:
+        return None
+
 
 def get_cluster_by_embedding(
     msa: list[str],
@@ -274,26 +303,59 @@ def get_cluster_by_embedding(
     
     total_seqs = len(msa)
     seq_len = len(msa[0])
-    # 预先分配一个大的tensor来存储所有结果
-    embeddings = torch.empty((total_seqs, sum([region[1]-region[0] for region in regions]), 512), dtype=torch.float32, device='cuda')
     
-    with torch.no_grad():
-        for i in range(0, total_seqs, batch_size):
-            sub_seqs = msa[i:min(i+batch_size, total_seqs)]
-            sub_embeddings = torch.stack(antiberty_runner.embed(sub_seqs))
-            
-            # 直接将结果复制到预分配的tensor中
-            end_idx = min(i+batch_size, total_seqs)
-            # embeddings[i:end_idx] = sub_embeddings[:, region[0]+1:region[1]+1, :]
-            idx_list = sum([list(range(region[0], region[1])) for region in regions], [])
-            embeddings[i:end_idx] = sub_embeddings[:, idx_list, :]
+    is_normal_ab = True # 是否为正常的抗体序列
+    if seq_len == regions[0][-1]:
+        is_normal_ab = False
+    
+    if is_normal_ab:
+        # 预先分配一个大的tensor来存储所有结果
+        embeddings = torch.empty((total_seqs, sum([region[1]-region[0] for region in regions]), 512), dtype=torch.float32, device='cuda')
+        
+        with torch.no_grad():
+            for i in range(0, total_seqs, batch_size):
+                sub_seqs = msa[i:min(i+batch_size, total_seqs)]
+                sub_embeddings = torch.stack(antiberty_runner.embed(sub_seqs))
+                
+                # 直接将结果复制到预分配的tensor中
+                end_idx = min(i+batch_size, total_seqs)
+                # embeddings[i:end_idx] = sub_embeddings[:, region[0]+1:region[1]+1, :]
+                idx_list = sum([list(range(region[0], region[1])) for region in regions], [])
+                embeddings[i:end_idx] = sub_embeddings[:, idx_list, :]
 
-            # 确保当前批次的计算结果已同步到GPU
-            torch.cuda.synchronize()
-            
-            # 清理不再需要的临时变量
-            del sub_embeddings
-            torch.cuda.empty_cache()
+                # 确保当前批次的计算结果已同步到GPU
+                torch.cuda.synchronize()
+                
+                # 清理不再需要的临时变量
+                del sub_embeddings
+                torch.cuda.empty_cache()
+    else:
+        cut_length = 30 # 用于嵌入的序列长度
+        embeddings = torch.empty((total_seqs, cut_length, 512), dtype=torch.float32, device='cuda')
+        
+        with torch.no_grad():
+            for i in range(0, total_seqs, batch_size):
+                sub_seqs = msa[i:min(i+batch_size, total_seqs)]
+                temp_regions_list = [find_letter_sequence_region(seq) for seq in sub_seqs]
+                temp_regions_list = [(region[-1]-30, region[-1]) if region is not None else (0, cut_length) for region in temp_regions_list]
+                
+                sub_embeddings = torch.stack(antiberty_runner.embed(sub_seqs))
+                # 直接将结果复制到预分配的tensor中
+                end_idx = min(i+batch_size, total_seqs)
+                
+                for i, current_idx in enumerate(range(i, end_idx)):
+                    temp_regions = temp_regions_list[i]
+                    temp_idx_list = list(range(temp_regions[0], temp_regions[1]))
+                    embeddings[current_idx] = sub_embeddings[i, temp_idx_list, :]
+                
+                # 确保当前批次的计算结果已同步到GPU
+                torch.cuda.synchronize()
+                
+                # 清理不再需要的临时变量
+                del sub_embeddings
+                torch.cuda.empty_cache()
+                
+                
 
     embedding_end = time.time()
     print("Embedding time:", embedding_end - embedding_start)
