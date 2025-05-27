@@ -106,7 +106,9 @@ def chirality_fixer(simulation):
 
             # Fix the H atom in place
             particle_mass = simulation.system.getParticleMass(indices["HA"])
-            simulation.system.setParticleMass(indices["HA"], 0.0)
+            # Setting the mass of the hydrogen atom to an extremely small value,
+            # setting it to 0 will cause an error.
+            simulation.system.setParticleMass(indices["HA"], 0.001 * unit.amu)
             d_stereoisomers.append((indices["HA"], particle_mass))
 
     if len(d_stereoisomers) > 0:

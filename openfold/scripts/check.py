@@ -163,9 +163,9 @@ class AmideBondFixer:
         """
         fix_cmd = f"{self.fixer_path} -i {pdb_file} -o {self.file_paths['fixed_pdb']} -s {fasta_file}"
         p = Popen(fix_cmd, shell=True, stdout=PIPE, stderr=PIPE)
-        _, err = p.communicate()
+        info, err = p.communicate()
         
-        if err:
+        if err or "Error" in info.decode('utf-8'):
             print(f"Error fixing {pdb_file}: {err.decode('utf-8')}")
             return None
         
