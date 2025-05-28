@@ -236,8 +236,6 @@ class AmideBondFixer:
             self.fixer(self.file_paths["broken_pdb"], self.file_paths["full_seqs"])
             self.cisrr(self.file_paths["fixed_pdb"], self.residues_to_delete_dict)
             self.fill_bfactor_occupancy()
-            # print("Checking final PDB file...")
-            # self.calculate_omega_and_clean(self.file_paths["filled_pdb"], verbose=True)
             print("Done.")
             
             for file_type in ["fixed_pdb", "broken_pdb", "full_seqs", "cisrr_pdb"]:

@@ -87,77 +87,6 @@ def _add_restraints(
     system.addForce(force)
 
 
-def selective_relax(
-    simulation, 
-    max_iterations, 
-    tolerance, 
-    mobile_residue_indices=None, 
-    mobile_atom_names=None, 
-    sidechain_only=True
-):
-    """
-    选择性地放松特定残基，固定其他部分
-    
-    Args:
-        simulation: OpenMM Simulation对象
-        mobile_residue_indices: 允许移动的残基索引列表
-        mobile_atom_names: 允许移动的原子名称列表
-        sidechain_only: 如果为True，只放松侧链原子，主链保持固定
-    """
-    topology = simulation.topology
-    original_masses = {}  # 存储原始质量
-    
-    # 定义主链原子名称
-    backbone_atoms = {"N", "CA", "C", "CB"}
-    
-    # 获取所有原子的原始质量
-    for atom in topology.atoms():
-        original_masses[atom.index] = simulation.system.getParticleMass(atom.index)
-    
-    # 固定所有原子（设为极小质量）
-    for atom in topology.atoms():
-        simulation.system.setParticleMass(atom.index, 0.001 * unit.amu)
-    
-    # 恢复指定残基/原子的质量，使其可以移动
-    for residue in topology.residues():
-        if mobile_residue_indices and residue.index in mobile_residue_indices:
-            # 遍历残基中的原子
-            for atom in residue.atoms():
-                should_be_mobile = True
-                
-                # 如果只放松侧链，检查是否为主链原子
-                if sidechain_only and atom.name in backbone_atoms:
-                    should_be_mobile = False
-                
-                # 如果指定了特定原子名称，进一步过滤
-                if mobile_atom_names and atom.name not in mobile_atom_names:
-                    should_be_mobile = False
-                
-                if should_be_mobile:
-                    simulation.system.setParticleMass(atom.index, original_masses[atom.index])
-                    
-        elif mobile_atom_names:
-            # 只有特定原子可以移动
-            for atom in residue.atoms():
-                should_be_mobile = atom.name in mobile_atom_names
-                
-                # 如果只放松侧链，额外检查是否为主链原子
-                if sidechain_only and atom.name in backbone_atoms:
-                    should_be_mobile = False
-                
-                if should_be_mobile:
-                    simulation.system.setParticleMass(atom.index, original_masses[atom.index])
-    
-    # 能量最小化
-    simulation.minimizeEnergy(maxIterations=max_iterations, tolerance=tolerance)
-    
-    # 恢复所有原子的原始质量
-    for atom_index, mass in original_masses.items():
-        simulation.system.setParticleMass(atom_index, mass)
-    
-    return simulation
-
-
 def chirality_fixer(simulation):
     topology = simulation.topology
     positions = simulation.context.getState(getPositions=True).getPositions()
@@ -204,7 +133,6 @@ def _openmm_minimize(
     restraint_set: str,
     exclude_residues: Sequence[int],
     use_gpu: bool,
-    mobile_residue_indices: Optional[list[int]] = None,
 ):
     """Minimize energy via openmm."""
 
@@ -235,21 +163,64 @@ def _openmm_minimize(
     state = simulation.context.getState(getEnergy=True, getPositions=True)
     ret["einit"] = state.getPotentialEnergy().value_in_unit(ENERGY)
     ret["posinit"] = state.getPositions(asNumpy=True).value_in_unit(LENGTH)
-    if mobile_residue_indices is not None:
-        simulation = selective_relax(
-            simulation, 
-            max_iterations=max_iterations, 
-            tolerance=tolerance, 
-            mobile_residue_indices=mobile_residue_indices, 
-            sidechain_only=True
-        )
-    else:
-        simulation.minimizeEnergy(maxIterations=max_iterations, tolerance=tolerance) # TODO: Is need to use this function before chirality_fixer?
-        simulation = chirality_fixer(simulation)
+    simulation.minimizeEnergy(maxIterations=max_iterations, tolerance=tolerance) # TODO: Is need to use this function before chirality_fixer?
+    simulation = chirality_fixer(simulation)
     state = simulation.context.getState(getEnergy=True, getPositions=True)
     ret["efinal"] = state.getPotentialEnergy().value_in_unit(ENERGY)
     ret["pos"] = state.getPositions(asNumpy=True).value_in_unit(LENGTH)
     ret["min_pdb"] = _get_pdb_string(simulation.topology, state.getPositions())
+    return ret
+
+
+def _openmm_minimize_select(
+    pdb_str: str,
+    use_gpu: bool,
+    max_iterations: int,
+    tolerance: unit.Unit,
+):
+    """Minimize energy via openmm."""
+
+    pdb_file = io.StringIO(pdb_str)
+    pdb = openmm_app.PDBFile(pdb_file)
+    force_field = openmm_app.ForceField("amber99sb.xml")
+    system = force_field.createSystem(pdb.topology)
+    
+    # Fix atom
+    backbone_atoms = {"N", "CA", "C", "O", "HA"}
+    original_masses = {}  # 存储原始质量
+
+    # Set the mass of the backbone atoms to 0 to fix them in place
+    for atom in pdb.topology.atoms():
+        original_masses[atom.index] = system.getParticleMass(atom.index)
+        if atom.name in backbone_atoms:
+            system.setParticleMass(atom.index, 0.0 * unit.dalton)
+
+    integrator = openmm.LangevinIntegrator(
+        0*unit.kelvin,
+        1.0/unit.picosecond,
+        1.0*unit.femtosecond
+    )
+    platform = openmm.Platform.getPlatformByName("CUDA" if use_gpu else "CPU")
+    simulation = openmm_app.Simulation(
+        pdb.topology, system, integrator, platform
+    )
+    simulation.context.setPositions(pdb.positions)
+
+    ret = {}
+    state = simulation.context.getState(getEnergy=True, getPositions=True)
+    ret["einit"] = state.getPotentialEnergy().value_in_unit(ENERGY)
+    ret["posinit"] = state.getPositions(asNumpy=True).value_in_unit(LENGTH)
+    
+    simulation.minimizeEnergy(maxIterations=max_iterations, tolerance=tolerance)
+    for atom_index, mass in original_masses.items():
+        simulation.system.setParticleMass(atom_index, mass)
+    simulation = chirality_fixer(simulation)
+
+    state = simulation.context.getState(getEnergy=True, getPositions=True)
+    ret["efinal"] = state.getPotentialEnergy().value_in_unit(ENERGY)
+    ret["pos"] = state.getPositions(asNumpy=True).value_in_unit(LENGTH)
+    ret["min_pdb"] = _get_pdb_string(simulation.topology, state.getPositions())
+    
     return ret
 
 
@@ -591,16 +562,23 @@ def _run_one_iteration(
             logging.info(
                 "Minimizing protein, attempt %d of %d.", attempts, max_attempts
             )
-            ret = _openmm_minimize(
-                pdb_string,
-                max_iterations=max_iterations,
-                tolerance=tolerance,
-                stiffness=stiffness,
-                restraint_set=restraint_set,
-                exclude_residues=exclude_residues,
-                use_gpu=use_gpu,
-                mobile_residue_indices=mobile_residue_indices,
-            )
+            if mobile_residue_indices is not None:
+                ret = _openmm_minimize_select(
+                    pdb_string,
+                    use_gpu=use_gpu,
+                    max_iterations=max_iterations,
+                    tolerance=tolerance,
+                )
+            else:
+                ret = _openmm_minimize(
+                    pdb_string,
+                    max_iterations=max_iterations,
+                    tolerance=tolerance,
+                    stiffness=stiffness,
+                    restraint_set=restraint_set,
+                    exclude_residues=exclude_residues,
+                    use_gpu=use_gpu,
+                )
             minimized = True
         except Exception as e:  # pylint: disable=broad-except
             print(e)
@@ -777,9 +755,10 @@ def run_pipeline(
     pdb_string_checked, info = fixer.process()
     if pdb_string_checked != None:
         pdb_string_hydrated = cleanup.fix_pdb(io.StringIO(pdb_string_checked), {})
+
         ret = _run_one_iteration(
             pdb_string=pdb_string_hydrated,
-            exclude_residues=exclude_residues,
+            exclude_residues=[],
             max_iterations=max_iterations,
             tolerance=tolerance,
             stiffness=stiffness,
@@ -788,8 +767,7 @@ def run_pipeline(
             use_gpu=use_gpu,
             mobile_residue_indices=info["deleted_residues_ids"],
         )
-        
-        headers = protein.get_pdb_headers(prot)    
+        headers = protein.get_pdb_headers(prot)
         if(len(headers) > 0):
             ret["min_pdb"] = '\n'.join(['\n'.join(headers), ret["min_pdb"]])
         
@@ -799,13 +777,5 @@ def run_pipeline(
         else:
             pdb_string_hydrated = ret["min_pdb"]
         ret.update(get_violation_metrics(prot))
-        ret.update(
-            {
-                "num_exclusions": len(exclude_residues),
-                "iteration": iteration,
-            }
-        )
-        violations = ret["violations_per_residue"]
-        exclude_residues = exclude_residues.union(ret["residue_violations"])
     
     return ret
