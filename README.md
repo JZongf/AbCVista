@@ -1,6 +1,6 @@
-# AbCFold
+# AbCVista
 
-**AbCFold, a fast and accurate antibody structure prediction method capable of predicting diverse antibody CDR-H3 conformational ensembles.**
+**AbCVista, a fast and accurate antibody structure prediction method capable of predicting diverse antibody conformational ensembles.**
 
 ---
 
@@ -14,13 +14,13 @@
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/JZongf/AbCFold.git
-   cd AbCFold
+   git clone https://github.com/JZongf/AbCVista.git
+   cd AbCVista
    ```
 2. Install dependencies:
    ```bash
    conda env create -f environment.yml
-   conda activate AbCFold
+   conda activate AbCVista
    python setup.py install
    ```
 3. Download databases:
@@ -95,7 +95,7 @@ When executing `python setup.py install`​, you may encounter `RuntimeError:The
 
 **Solution:**
 
-Modify the `cpp_extension.py` file located at `/path/to/envs/AbCFold/lib/python3.9/site-packages/torch/utils/cpp_extension.py`
+Modify the `cpp_extension.py` file located at `/path/to/envs/AbCVista/lib/python3.9/site-packages/torch/utils/cpp_extension.py`
 
 Find and **comment out** the following section:
 
@@ -115,7 +115,7 @@ Then execute `python setup.py install` again.
 
 ## License
 
-AbCFold source code is licensed under **Apache-2.0 license**.
+AbCVista source code is licensed under **Apache-2.0 license**.
 
 The **fine-tuned model parameters** provided in this project are modified from the original AlphaFold2 model parameters released by Google DeepMind.
 
