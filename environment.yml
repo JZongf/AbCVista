@@ -1,4 +1,4 @@
-name: AbCFold
+name: AbCVista
 channels:
   - conda-forge
   - bioconda
