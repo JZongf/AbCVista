@@ -172,13 +172,13 @@ def _openmm_minimize(
     return ret
 
 
-def _openmm_minimize_select(
+def _openmm_minimize_fix_bockbone(
     pdb_str: str,
     use_gpu: bool,
     max_iterations: int,
     tolerance: unit.Unit,
 ):
-    """Minimize energy via openmm."""
+    """Minimize energy via openmm, fixing the backbone atoms in place."""
 
     pdb_file = io.StringIO(pdb_str)
     pdb = openmm_app.PDBFile(pdb_file)
@@ -563,7 +563,7 @@ def _run_one_iteration(
                 "Minimizing protein, attempt %d of %d.", attempts, max_attempts
             )
             if mobile_residue_indices is not None:
-                ret = _openmm_minimize_select(
+                ret = _openmm_minimize_fix_bockbone(
                     pdb_string,
                     use_gpu=use_gpu,
                     max_iterations=max_iterations,

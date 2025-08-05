@@ -20,3 +20,4 @@ utils/back
 utils/back/*
 scripts/back
 scripts/back/*
+auto_email.py
