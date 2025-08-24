@@ -901,7 +901,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--openfold_checkpoint_path",
         type=str,
-        default="database/params_model_1_multimer_v3_lora.pt",
+        default=os.path.join(
+            script_dir, "database/params_model_1_multimer_v3_lora.pt",
+        ),
         help="""Path to OpenFold checkpoint. Can be either a DeepSpeed 
              checkpoint directory or a .pt file""",
     )
