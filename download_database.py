@@ -5,8 +5,8 @@ import shlex
 
 # --- Configuration ---
 DOWNLOAD_DIR = os.path.dirname(os.path.realpath(__file__))
-URL = "https://huggingface.co/jiezong/AbCFold-Database/resolve/main/database.tar.gz?download=true"
-MIRROR_URL = "https://hf-mirror.com/jiezong/AbCFold-Database/resolve/main/database.tar.gz?download=true"
+URL = "https://huggingface.co/jiezong/AbCVista-Database/resolve/main/database.tar.gz?download=true"
+MIRROR_URL = "https://hf-mirror.com/jiezong/AbCVista-Database/resolve/main/database.tar.gz?download=true"
 
 TAR_FILENAME = "database.tar.gz" # 从URL中提取或硬编码文件名
 tar_file_path = os.path.join(DOWNLOAD_DIR, TAR_FILENAME)
