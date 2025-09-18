@@ -10,11 +10,6 @@ from utils import align
 align.init_Abalign_path(path=os.path.join(script_dir, "lib"))
 
 from utils import (
-    get_msa_by_clonotype,
-    get_msa_by_length,
-    get_msa_by_pair,
-    get_msa_by_single,
-    get_msa_by_substitute,
     msa_supplement,
     get_antibody_region,
     fasta,
@@ -24,6 +19,7 @@ from utils import (
     get_msa,
 )
 from scripts import search_template
+from scripts.relax_parallel import parallel_relax_proteins
 
 import argparse
 import logging
@@ -84,7 +80,7 @@ from openfold.utils.trace_utils import (
     trace_model_,
 )
 from scripts import seqlogo
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 import gc
 import copy
 from peft import LoraModel, PeftModel
@@ -249,30 +245,6 @@ def save_seqlogo_thread(
         )
     except Exception as e:
         print(f"Save seqlogo failed: {e}")
-
-
-def relax_protein_thread(
-    args,
-    config,
-    index,
-    rank_list,
-    drank_list,
-    output_name,
-    output_directory,
-    unrelaxed_protein,
-):
-    try:
-        relax_protein(
-            config,
-            args.model_device,
-            unrelaxed_protein,
-            output_directory,
-            output_name
-            + "_ranked{}_dranked{}".format(rank_list[index], drank_list[index]),
-            args.cif_output,
-        )
-    except Exception as e:
-        print(f"Relaxation failed: {e}")
 
 
 def interface(args):
@@ -689,6 +661,8 @@ def interface(args):
                 dist_rank_list.append(rank)
 
             # Write the output
+            relax_tasks = []  # 收集所有需要 relax 的任务
+            
             for index, out in enumerate(outputs_list):
 
                 unrelaxed_protein = prep_output(
@@ -711,12 +685,50 @@ def interface(args):
                 unrelaxed_output_path = os.path.join(
                     output_directory, f"{output_name}{unrelaxed_file_suffix}"
                 )
+                
+                # 加载抗体残基编号映射（如果存在）
+                numbering_map = None
+                try:
+                    # 尝试加载所有链的编号映射并合并
+                    all_chain_numbering = protein.load_antibody_numbering(alignment_dir, tags)
+                    
+                    if all_chain_numbering:
+                        # 合并所有链的编号映射，需要根据链的位置调整索引
+                        numbering_map = {}
+                        chain_starts = []
+                        current_pos = 0
+
+                        # 计算每条链的起始位置
+                        if "region_index" in feature_dict:
+                            for region in feature_dict["region_index"]:
+                                region_data = region[0] if isinstance(region, list) else region
+                                chain_starts.append(current_pos)
+                                if "length" in region_data:
+                                    current_pos += region_data["length"]
+                                elif "FR4" in region_data:
+                                    current_pos += region_data["FR4"][1]
+                        
+                        # 应用每条链的编号映射
+                        for chain_idx, chain_name in enumerate(tags):
+                            if chain_name in all_chain_numbering:
+                                chain_info = all_chain_numbering[chain_name]
+                                chain_numbering = chain_info.get("numbering") if chain_info else None
+                                if not chain_numbering:
+                                    continue
+                                if chain_idx < len(chain_starts):
+                                    offset = chain_starts[chain_idx]
+                                    for local_idx, (num, ins_code) in chain_numbering.items():
+                                        global_idx = offset + local_idx
+                                        numbering_map[global_idx] = (num, ins_code)
+                except Exception as e:
+                    # 如果加载失败，静默继续，使用默认编号
+                    numbering_map = None
 
                 with open(unrelaxed_output_path, "w") as fp:
                     if args.cif_output:
                         fp.write(protein.to_modelcif(unrelaxed_protein))
                     else:
-                        fp.write(protein.to_pdb(unrelaxed_protein))
+                        fp.write(protein.to_pdb(unrelaxed_protein, numbering_map))
 
                 logger.info(f"Output written to {unrelaxed_output_path}...")
 
@@ -750,25 +762,43 @@ def interface(args):
 
                     logger.info(f"Model output written to {output_dict_path}...")
 
-                # relax the prediction
+                # 准备 relax 任务（不在这里执行，而是收集起来）
                 if not args.skip_relaxation and int(rank_list[index]) < 5:
-                    # Relax the prediction.
-                    logger.info(f"Running relaxation on {unrelaxed_output_path}...")
-                    try:
-                        relax_protein(
-                            config,
-                            args.model_device,
-                            unrelaxed_protein,
-                            output_directory,
-                            output_name
-                            + "_ranked{}_dranked{}".format(
-                                rank_list[index], dist_rank_list[index]
-                            ),
-                            args.cif_output,
-                        )
-                    except Exception as e:
-                        logger.info(f"Relaxation failed: {e}")
-                        continue
+                    # 保存蛋白质结构到临时 pickle 文件
+                    temp_pkl_dir = os.path.join(args.output_dir, "temp_relax_pkl")
+                    if not os.path.exists(temp_pkl_dir):
+                        os.makedirs(temp_pkl_dir)
+                    
+                    pkl_filename = f"{output_name}_ranked{rank_list[index]}_dranked{dist_rank_list[index]}.pkl"
+                    pkl_path = os.path.join(temp_pkl_dir, pkl_filename)
+                    
+                    with open(pkl_path, 'wb') as f:
+                        pickle.dump(unrelaxed_protein, f)
+                    
+                    # 添加到 relax 任务列表
+                    relax_tasks.append({
+                        'pkl_path': pkl_path,
+                        'output_name': output_name + "_ranked{}_dranked{}".format(
+                            rank_list[index], dist_rank_list[index]
+                        ),
+                        'output_directory': output_directory,
+                        'config_preset': args.config_preset,
+                        'model_device': args.model_device,
+                        'cif_output': args.cif_output,
+                    })
+            
+            # 批量并行执行所有 relax 任务
+            if relax_tasks:
+                logger.info(f"Starting parallel relaxation for {len(relax_tasks)} structures...")
+                parallel_relax_proteins(
+                    relax_tasks, 
+                    model_device=args.model_device,
+                    cpus=args.cpus,
+                    max_workers=args.relax_max_workers
+                )
+                
+                # 在 relax 完成后应用自定义编号
+                protein.apply_numbering_to_relaxed_pdbs(output_directory, alignment_dir, tags)
 
             if args.save_seqlogo:
                 with ProcessPoolExecutor(max_workers=args.cpus) as executor:
@@ -827,6 +857,9 @@ def main(args):
             # get msa
             database.init_databases_path(database_path=args.databases_path)
             get_msa.get_msa(args=args, antibody_list=antibody_list) # all
+            
+            # get antibody numbers file
+            get_chain_info.get_numbers_info(args=args, antibody_list=antibody_list)
             
             # get antibody region file
             get_antibody_region.write_regions(alignment_dir, antibody_list, args=args) 
@@ -936,6 +969,12 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="If True, the relaxation process is skipped, otherwise the first five structures will be relaxed.",
+    )
+    parser.add_argument(
+        "--relax_max_workers",
+        type=int,
+        default=5,
+        help="Maximum number of parallel workers for relaxation. If not specified, will auto-detect based on available GPUs/CPUs.",
     )
     parser.add_argument(
         "--multimer_ri_gap",

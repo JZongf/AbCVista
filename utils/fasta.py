@@ -1,5 +1,6 @@
 import itertools
 import pickle
+from functools import lru_cache
 
 
 def save_data_to_pickle(data, outfile):
@@ -7,7 +8,9 @@ def save_data_to_pickle(data, outfile):
         pickle.dump(data, f)
 
 
+@lru_cache(maxsize=128)
 def read_data_from_pickle(infile):
+    """读取 pickle 并缓存结果，避免重复磁盘 I/O（结果不变）。"""
     with open(infile, 'rb') as f:
         data = pickle.load(f)
     return data

@@ -4,12 +4,14 @@ from typing import Dict
 from utils.fasta import read_fasta_file, write_fasta_file
 from utils.align import run_alignment, delete_msa_by_first_seq
 from utils.database import unpaired_database_path
-from utils.get_msa_utils import hamming_distance, split_list
+from utils.get_msa_utils import hamming_distance, hamming_distance_bulk, split_list
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import hashlib
 import multiprocessing as mp
 from utils.get_chain_info import AntiBody, AntiBodySingle
 from utils.multiprocess import dynamic_executor_context
+from functools import lru_cache
+import asyncio
 
 class UnpairedFasta:
     def __init__(
@@ -22,6 +24,39 @@ class UnpairedFasta:
         self.cdr1_length = cdr1_length
         self.cdr2_length = cdr2_length
         self.path = path
+        # 从文件名中解析序列条目数量，避免后续重复解析
+        try:
+            base = os.path.splitext(path)[0] if isinstance(path, str) else ""
+            self.count = int(base.split("_")[-1]) if base else 0
+        except Exception:
+            self.count = 0
+
+
+# 全局 I/O 线程池用于文件读取的并发加速（避免为每次调用重复创建线程）
+_IO_POOL = ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4)))
+
+
+@lru_cache(maxsize=4096)
+def _read_two_line_fasta_cached(file_path):
+    """以两行一条记录的方式读取 fasta（数据库为一行 header + 一行序列）。
+    使用 LRU 缓存避免重复 I/O，保证同样输入下结果完全一致。
+    返回 (names_list, seqs_list)。
+    """
+    # 这里不使用 utils.fasta.read_fasta_file 是为了保持数据库特殊格式的极致读取速度
+    with open(file_path, "r") as f:
+        lines = f.read().splitlines()
+    # 一行名称一行序列
+    names = lines[0::2]
+    seqs = lines[1::2]
+    return names, seqs
+
+
+async def _prefetch_files(paths):
+    """并发预取若干文件到 LRU 缓存（协程 + 线程池）。"""
+    loop = asyncio.get_running_loop()
+    tasks = [loop.run_in_executor(_IO_POOL, _read_two_line_fasta_cached, p) for p in paths]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=False)
 
 
 def cdrs_length_match(
@@ -49,10 +84,8 @@ def cdrs_length_match(
         closest_dist_dict[d.path] = dist
     # Sort the results by distance
     closest_list = sorted(closest_dist_dict.items(), key=lambda x: x[1])
-    # Count the total number of sequences found
-    seqs_count = sum(
-        [int(path.strip(".fasta").split("_")[-1]) for path in closest_dist_dict.keys()]
-    )
+    # Count the total number of sequences found（使用预解析的 count 提速）
+    seqs_count = sum([d.count for d in database_lengths.get(chaintype + "_" + str(query_length[2]), [])])
 
     # Prevent cases where the query CDR3 is not found in the database.
     database_lengths_list = [
@@ -143,34 +176,40 @@ def get_msa_by_regions_length_unpaired(
 
     closest_idx = 0
     target_seqs_list = []
+    # 预取前若干个候选文件，加速首次命中（线程池 + 协程）
+    try:
+        prefetch_n = min(8, len(closest_lengths_list))
+        prefetch_paths = [os.path.join(database_path, closest_lengths_list[i][0]) for i in range(prefetch_n)]
+        # 独立事件循环运行，不影响外部调度
+        if prefetch_paths:
+            asyncio.run(_prefetch_files(prefetch_paths))
+    except RuntimeError:
+        # 如果当前处于已有事件循环里（极少发生），则退化为同步读取
+        pass
     while len(target_seqs_list) < minmin_seqs:
         if closest_idx >= len(closest_lengths_list):
             break
 
         closest_lengths = closest_lengths_list[closest_idx][0].split("_")
-        target_database = os.path.join(
-            database_path, closest_lengths_list[closest_idx][0]
-        )
+        target_database = os.path.join(database_path, closest_lengths_list[closest_idx][0])
 
-        with open(target_database, "r") as f:
-            lines_list = f.read().splitlines()
-            target_names_list_temp = lines_list[0::2]
-            target_seqs_list_temp = lines_list[1::2]
+        # 使用缓存读取，若未命中则自动加载并缓存
+        target_names_list_temp, target_seqs_list_temp = _read_two_line_fasta_cached(target_database)
 
         if (
             query_cdr3_length == int(closest_lengths[3])
             and len(target_seqs_list_temp) >= minmin_seqs * 10
         ):
             hamming_distance_cutoff = int(target_lengths[5] * hamming_tolerance)
-            target_seqs_list.extend(
-                [
-                    target_seqs_list_temp[index]
-                    for index, t_seq in enumerate(target_names_list_temp)
-                    if len(t_seq.lstrip(">")) == query_cdr3_length
-                    and hamming_distance(t_seq.lstrip(">"), query_cdr3)
-                    <= hamming_distance_cutoff
-                ]
-            )
+            # 批量计算汉明距离，顺序与筛选逻辑保持一致
+            stripped = [t.lstrip(">") for t in target_names_list_temp]
+            eq_idx = [i for i, s in enumerate(stripped) if len(s) == query_cdr3_length]
+            if eq_idx:
+                cand = [stripped[i] for i in eq_idx]
+                dists = hamming_distance_bulk(cand, query_cdr3)
+                for pos, i in enumerate(eq_idx):
+                    if dists[pos] <= hamming_distance_cutoff:
+                        target_seqs_list.append(target_seqs_list_temp[i])
         else:
             target_seqs_list.extend(target_seqs_list_temp)
             if len(target_seqs_list) > maxmin_seqs:
@@ -180,13 +219,18 @@ def get_msa_by_regions_length_unpaired(
         while len(target_seqs_list) > maxmin_seqs:
             hamming_tolerance = hamming_tolerance * 0.9
             hamming_distance_cutoff = int(target_lengths[5] * hamming_tolerance)
-            target_seqs_list = [
-                target_seqs_list_temp[index]
-                for index, t_seq in enumerate(target_names_list_temp)
-                if len(t_seq.lstrip(">")) == query_cdr3_length
-                and hamming_distance(t_seq.lstrip(">"), query_cdr3)
-                <= hamming_distance_cutoff
-            ]
+            stripped = [t.lstrip(">") for t in target_names_list_temp]
+            eq_idx = [i for i, s in enumerate(stripped) if len(s) == query_cdr3_length]
+            if eq_idx:
+                cand = [stripped[i] for i in eq_idx]
+                dists = hamming_distance_bulk(cand, query_cdr3)
+                target_seqs_list = [
+                    target_seqs_list_temp[eq_idx[pos]]
+                    for pos in range(len(eq_idx))
+                    if dists[pos] <= hamming_distance_cutoff
+                ]
+            else:
+                target_seqs_list = []
             if hamming_tolerance < 0.1:
                 break
 
@@ -200,7 +244,7 @@ def get_msa_by_regions_length_unpaired(
 
 
 def get_msa_by_single(
-    antibody: AntiBody,
+    antibody,
     scheme,
     temp_dir,
     output_alignments_dir,

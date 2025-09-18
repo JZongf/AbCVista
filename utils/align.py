@@ -121,3 +121,48 @@ def delete_msa_by_first_seq(msa_path):
     seqs_list = ["".join(chars) for chars in seqs_list]
 
     return names_list, seqs_list
+
+
+def get_numbers(
+    fasta_file, 
+    output_dir, 
+    scheme="chothia", 
+    chain_type="H",
+    align_info=False
+):
+    """Get the numbering of the antibody sequence using Abalign."""
+
+    out_numbers_path = os.path.join(output_dir, "numbers.txt")
+    out_fasta_path = os.path.join(output_dir, "numbered.fasta")
+    out_regioned_fasta_path = out_fasta_path + ".temp.txt"
+    scheme_dict = {"chothia": "-c", "imgt": "-g", "kabat": "-k", "martin": "-m"}
+    scheme_cmd = scheme_dict[scheme]
+    chain_dict = {"H": "-ah", "L": "-al"}
+    chain_cmd = chain_dict[chain_type]
+
+    # Run Abalign to get the numbers file
+    cmd = "{} -i {} {} {} -fn {} {} -s -z 60 -lfs 0".format(
+        Abalign_path,
+        fasta_file,
+        chain_cmd,
+        out_fasta_path,
+        out_numbers_path,
+        scheme_cmd,
+    )
+    print("get_numbering cmd:", cmd)
+    info = os.popen(cmd=cmd)
+    stream = info.read()
+    if align_info:
+        print(stream)
+    
+    # Clean up temporary files
+    try:
+        os.remove(out_fasta_path)
+    except Exception as e:
+        pass
+    try:
+        os.remove(out_regioned_fasta_path)
+    except Exception as e:
+        pass
+
+    return out_numbers_path

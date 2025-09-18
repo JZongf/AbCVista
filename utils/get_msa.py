@@ -24,9 +24,22 @@ def get_msa(args, antibody_list):
     unpaired_database_length_dict = get_msa_by_single.get_database_length_dict(databases_path)
     fv_lengths_max, fv_lengths_q3, fv_database_path = get_msa_by_pair.get_database_stats(databases_path)
 
+    # 估算任务数量，动态选择执行器（不改变原先 process_threshold=1 的既有行为）
+    total_tasks = 0
+    for antibody in antibody_list:
+        # 单链：clonotype、single、substitute 三类
+        total_tasks += len(antibody.heavy_antibody) * 3
+        total_tasks += len(antibody.light_antibody) * 3
+
+        # 配对：paired 与 inner_pair
+        paired = antibody.get_all_antibodies()
+        if paired:
+            total_tasks += sum(1 for p in paired if p is not None and p.is_paired())
+        total_tasks += sum(1 for ip in antibody.inner_pair_antibody if ip is not None)
+
     with  dynamic_executor_context(process_threshold=1, max_workers=args.cpus) as dynamic_executor:
         futures = []
-        executor = dynamic_executor.get_executor(10)
+        executor = dynamic_executor.get_executor(total_tasks)
         for antibody in antibody_list:
             if antibody.is_paired() and (length_heavy_max == 0 or length_light_max == 0):
                 length_heavy_max, length_light_max = get_msa_by_substitute.get_sub_max_length(databases_path, heavy_length_databases, light_length_databases)

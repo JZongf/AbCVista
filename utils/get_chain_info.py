@@ -1,9 +1,10 @@
 import os
 import sys
 import random
+import tempfile
 from concurrent.futures import ProcessPoolExecutor
-from utils.align import run_alignment, get_clonotype
-from utils.fasta import read_fasta_file
+from utils.align import run_alignment, get_clonotype, get_numbers
+from utils.fasta import read_fasta_file, write_fasta_file
 import re
 import pandas as pd
 from itertools import chain
@@ -372,3 +373,56 @@ def get_chain_info(args):
     ]
 
     return antibodes_list
+
+
+def get_numbers_info(args, antibody_list):
+    """Get numbering information for each chain in the antibody list."""
+    
+    out_alignments_dir = (
+        os.path.join(args.output_dir, "alignments")
+        if args.use_precomputed_alignments is None
+        else args.use_precomputed_alignments
+    )
+
+    os.makedirs(out_alignments_dir, exist_ok=True)
+    os.makedirs(args.temp_dir, exist_ok=True)
+
+    def process_chain(chain, chain_type: str):
+        if chain is None:
+            return
+
+        name = chain.name
+        seq = chain.seq
+        seq = seq.replace("*", "")
+
+        # 原子创建唯一临时文件，避免重名与竞态
+        fd, tmp_path = tempfile.mkstemp(dir=args.temp_dir, suffix=".fasta")
+        os.close(fd)
+        try:
+            # 写入 fasta
+            write_fasta_file([">" + name], [seq], tmp_path)
+
+            # 输出目录
+            out_numbers_dir = os.path.join(out_alignments_dir, name)
+            os.makedirs(out_numbers_dir, exist_ok=True)
+
+            out_numbers_file = get_numbers(
+                fasta_file=tmp_path,
+                output_dir=out_numbers_dir,
+                scheme="chothia",
+                chain_type=chain_type,
+                align_info=False,
+            )
+            print(out_numbers_file)
+        finally:
+            try:
+                os.remove(tmp_path)
+                pass
+            except FileNotFoundError:
+                pass
+
+    for antibody in antibody_list:
+        for hchain in getattr(antibody, "heavy_antibody", []):
+            process_chain(hchain, "H")
+        for lchain in getattr(antibody, "light_antibody", []):
+            process_chain(lchain, "L")
