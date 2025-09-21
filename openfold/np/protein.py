@@ -465,9 +465,15 @@ def apply_numbering_to_relaxed_pdbs(output_directory: str, alignment_dir: str, t
                             
                             if residue_idx in chain_numbering:
                                 num, ins_code = chain_numbering[residue_idx]
-                                # 格式化新编号（右对齐4位 + 1位插入编码）
-                                new_num_str = f"{num:>4}{ins_code:<1}"
-                                # 替换行中的编号部分（22-27 列）
+                                # Safe formatting: clamp to 4-digit resSeq and 1-char iCode
+                                try:
+                                    num_int = int(num)
+                                except Exception:
+                                    num_int = 0
+                                num_str = f"{num_int:>4}"[-4:]
+                                icode = (ins_code if ins_code else " ")[:1]
+                                new_num_str = num_str + icode
+                                # Replace the resSeq+iCode region (columns 23-27)
                                 line = line[:22] + new_num_str + line[27:]
                 
                 elif line.startswith("TER"):
@@ -482,7 +488,13 @@ def apply_numbering_to_relaxed_pdbs(output_directory: str, alignment_dir: str, t
                                 
                                 if residue_idx in chain_numbering:
                                     num, ins_code = chain_numbering[residue_idx]
-                                    new_num_str = f"{num:>4}{ins_code:<1}"
+                                    try:
+                                        num_int = int(num)
+                                    except Exception:
+                                        num_int = 0
+                                    num_str = f"{num_int:>4}"[-4:]
+                                    icode = (ins_code if ins_code else " ")[:1]
+                                    new_num_str = num_str + icode
                                     line = line[:22] + new_num_str + line[27:]
                 
                 new_lines.append(line)
@@ -570,7 +582,7 @@ def to_pdb(prot: Protein, numbering_map: Optional[Dict[int, Tuple[int, str]]] = 
             insertion_code = ""
             res_num = residue_index[i]
             
-            # 应用自定义编号（如果提供）
+            # Apply custom antibody numbering if provided
             if numbering_map and i in numbering_map:
                 res_num, insertion_code = numbering_map[i]
             
@@ -585,12 +597,20 @@ def to_pdb(prot: Protein, numbering_map: Optional[Dict[int, Tuple[int, str]]] = 
                 chain_tag = chain_tags[chain_index[i]]
 
             # PDB is a columnar format, every space matters here!
+            # Safe formatting of residue number and insertion code
+            try:
+                res_num_int = int(res_num)
+            except Exception:
+                res_num_int = 0
+            resnum_str = f"{res_num_int:>4}"[-4:]
+            icode_str = (insertion_code if insertion_code else " ")[:1]
+
             atom_line = (
                 f"{record_type:<6}{atom_index:>5} {name:<4}{alt_loc:>1}"
                 #TODO: check this refactor, chose main branch version
                 #f"{res_name_3:>3} {chain_ids[chain_index[i]]:>1}"
                 f"{res_name_3:>3} {chain_tag:>1}"
-                f"{res_num:>4}{insertion_code:>1}   "
+                f"{resnum_str}{icode_str}   "
                 f"{pos[0]:>8.3f}{pos[1]:>8.3f}{pos[2]:>8.3f}"
                 f"{occupancy:>6.2f}{b_factor:>6.2f}          "
                 f"{element:>2}{charge:>2}"
@@ -608,16 +628,22 @@ def to_pdb(prot: Protein, numbering_map: Optional[Dict[int, Tuple[int, str]]] = 
             # Close the chain.
             chain_end = "TER"
             
-            # 获取终止行的残基编号
+            # Determine residue number for TER line
             ter_res_num = residue_index[i]
             ter_insertion_code = ""
             if numbering_map and i in numbering_map:
                 ter_res_num, ter_insertion_code = numbering_map[i]
+            try:
+                ter_res_num_int = int(ter_res_num)
+            except Exception:
+                ter_res_num_int = 0
+            ter_resnum_str = f"{ter_res_num_int:>4}"[-4:]
+            ter_icode_str = (ter_insertion_code if ter_insertion_code else " ")[:1]
             
             chain_termination_line = (
                 f"{chain_end:<6}{atom_index:>5}      "
                 f"{res_1to3(aatype[i]):>3} "
-                f"{chain_tag:>1}{ter_res_num:>4}{ter_insertion_code:>1}"
+                f"{chain_tag:>1}{ter_resnum_str}{ter_icode_str}"
             )
             pdb_lines.append(chain_termination_line)
             atom_index += 1

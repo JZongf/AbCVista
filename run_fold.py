@@ -710,16 +710,15 @@ def interface(args):
                         
                         # 应用每条链的编号映射
                         for chain_idx, chain_name in enumerate(tags):
-                            if chain_name in all_chain_numbering:
-                                chain_info = all_chain_numbering[chain_name]
-                                chain_numbering = chain_info.get("numbering") if chain_info else None
-                                if not chain_numbering:
-                                    continue
-                                if chain_idx < len(chain_starts):
-                                    offset = chain_starts[chain_idx]
-                                    for local_idx, (num, ins_code) in chain_numbering.items():
-                                        global_idx = offset + local_idx
-                                        numbering_map[global_idx] = (num, ins_code)
+                            # load_antibody_numbering returns a mapping: {local_idx: (num, ins_code)}
+                            chain_numbering = all_chain_numbering.get(chain_name)
+                            if not chain_numbering:
+                                continue
+                            if chain_idx < len(chain_starts):
+                                offset = chain_starts[chain_idx]
+                                for local_idx, (num, ins_code) in chain_numbering.items():
+                                    global_idx = offset + local_idx
+                                    numbering_map[global_idx] = (num, ins_code)
                 except Exception as e:
                     # 如果加载失败，静默继续，使用默认编号
                     numbering_map = None
