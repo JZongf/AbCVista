@@ -72,6 +72,10 @@ def ensembled_transform_fns(
     if(not common_cfg.resample_msa_in_recycling):
         msa_seed = ensemble_seed
     
+    # 获取随机采样配置
+    random_sample = getattr(common_cfg, 'random_msa_sample', False)
+    random_seed = getattr(common_cfg, 'msa_random_seed', None)
+    
     if cluster:
         transforms.append(
             sample_msa.sample_msa_cluster(
@@ -82,6 +86,8 @@ def ensembled_transform_fns(
                 region_mask=False,
                 msa_cluster_idx=msa_cluster_idx,
                 fix_cluster_size=common_cfg.fix_cluster_size,
+                random_sample=random_sample,  # 传递随机采样参数
+                random_seed=random_seed,  # 传递随机数种子
             )
         )
         
@@ -95,7 +101,9 @@ def ensembled_transform_fns(
                     max_iter=max_iters,
                     region_index=region_index,
                     region_mask=False,
-                    msas_num=msas_num
+                    msas_num=msas_num,
+                    random_sample=random_sample,  # 传递随机采样参数
+                    random_seed=random_seed,  # 传递随机数种子
                 )
             )
         else:
@@ -107,6 +115,8 @@ def ensembled_transform_fns(
                     max_iter=max_iters,
                     region_index=region_index,
                     region_mask=False,
+                    random_sample=random_sample,  # 传递随机采样参数
+                    random_seed=random_seed,  # 传递随机数种子
                 )
             )
 

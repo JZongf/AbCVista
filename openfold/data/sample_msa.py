@@ -331,6 +331,7 @@ def sample_msa2_multimer(
     region_mask=False,
     msas_num=[],
     random_sample=False,
+    random_seed=None,  # 新增随机数种子参数
 ):
     """
     batch: A dictionary of various features
@@ -339,7 +340,16 @@ def sample_msa2_multimer(
     iter_idx: Iteration number
     max_iter: Maximum number of iterations in one sampling
     sample_iter_time: Number of small samples in one large sample
+    random_sample: Whether to use random sampling
+    random_seed: Random seed for reproducible sampling
     """
+    # 创建局部随机数生成器，避免影响全局随机性
+    rng = None
+    if random_sample:
+        rng = random.Random()
+        if random_seed is not None:
+            rng.seed(random_seed + iter_idx)  # 加上iter_idx确保每次迭代有不同的随机性
+    
     # 将msa分为3部分进行排序
     temp_msa = []
     split_index = [0]
@@ -361,8 +371,8 @@ def sample_msa2_multimer(
         split_idx_list = generate_split_list(end_point, max_seq//(len(split_index)-1), start_index=split_index[start_index])
         for idx in split_idx_list:
             if len(idx) > 0:
-                if random_sample:
-                    sel_idx.append(random.choice(idx))
+                if random_sample and rng:
+                    sel_idx.append(rng.choice(idx))
                 else:
                     temp_sel_idx = (len(idx)//max_sample_time) * current_sample_time
                     temp_sel_idx = min(temp_sel_idx, len(idx)-1)
@@ -381,8 +391,8 @@ def sample_msa2_multimer(
 
         for idx in extra_split_idx_list:
             if len(idx) > 0:
-                if random_sample:
-                    extra_sel_idx.append(random.choice(idx))
+                if random_sample and rng:
+                    extra_sel_idx.append(rng.choice(idx))
                 else:
                     temp_extra_sel_idx = (len(idx)//max_sample_time) * extra_sample_time
                     if max_seq == max_extra_msa_seq:
@@ -400,19 +410,6 @@ def sample_msa2_multimer(
             batch['extra_' + k] = batch[k][extra_sel_idx]
             batch[k] = batch[k][sel_idx]
     
-    # if region_index is not None and region_mask:
-    #     # 如果需要mask的话，将CDR3区域的氨基酸序列设为0
-    #     # 由于CDR3区域的长度不一样，所以需要根据region_index来进行mask
-    #     # 每一轮sample_iter_time的迭代，都会mask掉一部分CDR3区域
-    #     mask_msa_num = int((sample_iter_time - iter_idx%sample_iter_time + 1) / sample_iter_time * batch['msa'].shape[0])
-    #     extra_mask_msa_num = int((sample_iter_time - iter_idx%sample_iter_time + 1) / sample_iter_time * batch['extra_msa'].shape[0])
-    #     start_index = 0
-    #     for index in region_index:
-    #         if index[0]["chain_type"] == "H":
-    #             batch['msa'][:mask_msa_num, start_index+index[0]["CDR3"][0]:start_index+index[0]["CDR3"][1]] = 0 # 将CDR3区域的氨基酸序列设为0
-    #             batch["extra_msa"][:extra_mask_msa_num, start_index+index[0]["CDR3"][0]:start_index+index[0]["CDR3"][1]] = 0
-    #             start_index += index[0]["length"]
-    
     return batch
 
 
@@ -425,6 +422,8 @@ def sample_msa2(
     max_iter=20,
     region_index=None,
     region_mask=False,
+    random_sample=False,
+    random_seed=None,  # 新增随机数种子参数
 ):
     """
     batch: A dictionary of various features
@@ -433,7 +432,16 @@ def sample_msa2(
     iter_idx: Iteration number
     max_iter: Maximum number of iterations in one sampling
     sample_iter_time: Number of small samples in one large sample
+    random_sample: Whether to use random sampling
+    random_seed: Random seed for reproducible sampling
     """
+    # 创建局部随机数生成器，避免影响全局随机性
+    rng = None
+    if random_sample:
+        rng = random.Random()
+        if random_seed is not None:
+            rng.seed(random_seed + iter_idx)  # 加上iter_idx确保每次迭代有不同的随机性
+        
     # 将msa分为3部分进行排序
     sel_idx = []
     extra_sel_idx = []
@@ -443,26 +451,32 @@ def sample_msa2(
 
     split_idx_list = generate_split_list(max_seqs, max_seq, start_index=0)
     for idx in split_idx_list:
-        temp_sel_idx = (len(idx)//max_sample_time) * current_sample_time
-        temp_sel_idx = min(temp_sel_idx, len(idx)-1)
-        if current_sample_time >= len(idx):
-            sel_idx.append(idx[-1])
+        if random_sample and rng:
+            sel_idx.append(rng.choice(idx))
         else:
-            sel_idx.append(idx[temp_sel_idx])
+            temp_sel_idx = (len(idx)//max_sample_time) * current_sample_time
+            temp_sel_idx = min(temp_sel_idx, len(idx)-1)
+            if current_sample_time >= len(idx):
+                sel_idx.append(idx[-1])
+            else:
+                sel_idx.append(idx[temp_sel_idx])
     
     extar_idx_list = generate_split_list(max_seqs, max_extra_msa_seq, start_index=0)
     for idx in extar_idx_list:
-        temp_extra_sel_idx = (len(idx)//max_sample_time) * current_sample_time
-        
-        # # 排除掉已经选择的序列
-        # if idx[temp_extra_sel_idx] in sel_idx:
-        #     temp_extra_sel_idx += 1
-            
-        temp_extra_sel_idx = min(temp_extra_sel_idx, len(idx)-1)
-        if current_sample_time >= len(idx):
-            extra_sel_idx.append(idx[-1])
+        if random_sample and rng:
+            extra_sel_idx.append(rng.choice(idx))
         else:
-            extra_sel_idx.append(idx[temp_extra_sel_idx])
+            temp_extra_sel_idx = (len(idx)//max_sample_time) * current_sample_time
+            
+            # # 排除掉已经选择的序列
+            # if idx[temp_extra_sel_idx] in sel_idx:
+            #     temp_extra_sel_idx += 1
+                
+            temp_extra_sel_idx = min(temp_extra_sel_idx, len(idx)-1)
+            if current_sample_time >= len(idx):
+                extra_sel_idx.append(idx[-1])
+            else:
+                extra_sel_idx.append(idx[temp_extra_sel_idx])
 
     sel_idx[0] = 0
     extra_sel_idx[0] = 0
@@ -470,20 +484,6 @@ def sample_msa2(
         if k in batch:
             batch['extra_' + k] = batch[k][extra_sel_idx]
             batch[k] = batch[k][sel_idx]
-    
-    # if region_index is not None and region_mask:
-    #     # 如果需要mask的话，将CDR3区域的氨基酸序列设为0
-    #     # 由于CDR3区域的长度不一样，所以需要根据region_index来进行mask
-    #     # 每一轮sample_iter_time的迭代，都会mask掉一部分CDR3区域
-    #     mask_msa_num = int((sample_iter_time - iter_idx%sample_iter_time + 1) / sample_iter_time * batch['msa'].shape[0])
-    #     extra_mask_msa_num = int((sample_iter_time - iter_idx%sample_iter_time + 1) / sample_iter_time * batch['extra_msa'].shape[0])
-    #     start_index = 0
-    #     for index in region_index:
-    #         if index[0]["chain_type"] == "H":
-    #             batch['msa'][:mask_msa_num, start_index+index[0]["CDR3"][0]:start_index+index[0]["CDR3"][1]] = 0 # 将CDR3区域的氨基酸序列设为0
-    #             batch["extra_msa"][:extra_mask_msa_num, start_index+index[0]["CDR3"][0]:start_index+index[0]["CDR3"][1]] = 0
-    #             start_index += index[0]["length"]
-    
     
     return batch
 
@@ -526,6 +526,8 @@ def msa_cluster(
     cluster_params={},
     max_msa_clusters=64,
     embedding_batch_size=256,
+    random_sample=False,
+    random_seed=None,
 ):
     """
     Cluster the MSA into several groups according to the distance between the antibody sequence and the query sequence.
@@ -539,6 +541,7 @@ def msa_cluster(
         cluster_params=cluster_params,
         batch_size=256,
         with_pair=False,
+        random_seed=random_seed,  # 传递随机种子给聚类函数
     )
 
     cluster_label = selected_clusters
@@ -574,6 +577,8 @@ def msa_cluster_multimer(
     cluster_params={},
     max_msa_clusters=64,
     embedding_batch_size=256,
+    random_sample=False,
+    random_seed=None,
 ):
     assert cluster_params["method"] in ["kmeans", "hdbscan"]
     paired_msa_labels = []
@@ -632,6 +637,7 @@ def msa_cluster_multimer(
             batch_size=256,
             with_pair=True,
             pair_size=len(paired_msa),
+            random_seed=random_seed,  # 传递随机种子给聚类函数
         )
         paired_msa_labels.append(pair_clusters)
         chains_labels_list.append(selected_single_clusters)
@@ -712,22 +718,39 @@ def sample_msa_cluster(
     region_mask=False,
     msa_cluster_idx=None,
     fix_cluster_size=False,
+    random_sample=False,
+    random_seed=None,
 ):
     """
     Sample the MSA according to the clustering results.
     """
+    # 创建局部随机数生成器，避免影响全局随机性
+    rng = None
+    if random_sample:
+        rng = random.Random()
+        if random_seed is not None:
+            rng.seed(random_seed + iter_idx)  # 加上iter_idx确保每次迭代有不同的随机性
+        
     current_sample_time = iter_idx
     cluster_idx = msa_cluster_idx[current_sample_time]
     
     if isinstance(cluster_idx[0], list):
         for i in range(len(cluster_idx)):
-            cluster_idx[i] = cluster_idx[i][:512]
+            # 如果使用随机采样，随机打乱聚类内的序列
+            if random_sample and rng:
+                cluster_idx[i] = rng.sample(cluster_idx[i], min(max_seq, len(cluster_idx[i])))
+            else:
+                cluster_idx[i] = cluster_idx[i][:512]
         if fix_cluster_size:
             cluster_idx = sample_fixed_msa(cluster_idx, max_seq)
         else:
             cluster_idx = sum(cluster_idx, [])
     else:
-        cluster_idx = cluster_idx[:512]
+        # 如果使用随机采样，随机选择序列
+        if random_sample and rng:
+            cluster_idx = rng.sample(cluster_idx, min(max_seq, len(cluster_idx)))
+        else:
+            cluster_idx = cluster_idx[:512]
 
     sel_idx = cluster_idx
     sel_idx[0] = 0

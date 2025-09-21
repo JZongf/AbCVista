@@ -207,6 +207,7 @@ def cosinner_similarity_cluster(
     cluster_params={}, 
     with_pair=False, 
     pair_size=0,
+    random_seed=None,  # 添加随机种子参数
 ):
     # calculate cosine similarity matrix
     similarity_matrix = compute_cosine_similarity_torch(vectors)
@@ -219,9 +220,11 @@ def cosinner_similarity_cluster(
     distance_matrix[distance_matrix < 0] = 0
     
     if cluster_params["method"] == "hdbscan":
+        # HDBSCAN 是确定性算法，不需要随机种子
         clustering = HDBSCAN(min_cluster_size=cluster_params["min_cluster_size"], min_samples=cluster_params["min_cluster_size"], metric='precomputed', n_jobs=-1)
     elif cluster_params["method"] == "kmeans":
-        clustering = KMeans(n_clusters=cluster_params["n_clusters"], random_state=0)
+        # KMeans 只在提供了随机种子时才设置
+        clustering = KMeans(n_clusters=cluster_params["n_clusters"], random_state=random_seed)
         
     # get cluster labels
     clustering.fit(distance_matrix)
@@ -297,6 +300,7 @@ def get_cluster_by_embedding(
     batch_size=256,
     with_pair=False,
     pair_size=0,
+    random_seed=None,  # 添加随机种子参数
 ):
     embedding_start = time.time()
     antiberty_runner = AntiBERTyRunner()
@@ -367,6 +371,7 @@ def get_cluster_by_embedding(
         cluster_params=cluster_params,
         with_pair=with_pair,
         pair_size=pair_size,
+        random_seed=random_seed,  # 传递随机种子
     )
     # 构建一个长度为total_seqs的列表，每个元素为-1，表示未被分配到任何聚类
     selected_cluster_labels = [-1] * total_seqs

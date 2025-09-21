@@ -265,6 +265,8 @@ def interface(args):
     config.data.common.max_recycling_iters = args.sample_count
     config.data.common.sample_iter_time = args.sample_iter_time
     config.data.common.fix_cluster_size = args.fix_cluster_size
+    config.data.common.random_msa_sample = args.random_msa_sample  # 添加msa随机采样配置
+    config.data.common.msa_random_seed = args.msa_random_seed  # 添加msa随机采样的随机数种子配置
     config.model.early_stop = args.early_stop
     # set early stop to True if kmeans or hdbscan clustering is used
     if args.kmeans_cluster or args.hdbscan_cluster:
@@ -453,6 +455,8 @@ def interface(args):
                             cluster_params=cluster_params,
                             max_msa_clusters=max(args.max_msa_clusters, args.max_extra_msa),
                             embedding_batch_size=args.embedding_batch_size,
+                            random_sample=args.random_msa_sample,  # 传递随机采样参数
+                            random_seed=args.msa_random_seed,  # 传递随机数种子
                         )
                     )
                     
@@ -478,6 +482,8 @@ def interface(args):
                         cluster_params=cluster_params,
                         max_msa_clusters=max(args.max_msa_clusters, args.max_extra_msa),
                         embedding_batch_size=args.embedding_batch_size,
+                        random_sample=args.random_msa_sample,  # 传递随机采样参数
+                        random_seed=args.msa_random_seed,  # 传递随机数种子
                     )
 
                 # 记录个batch真实使用的msa数量
@@ -1005,7 +1011,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--temp_dir",
         type=str,
-        default="/tmp/AbCVista",
+        default="/tmp/AbCFold",
         help="Path to directory containing temporary files.",
     )
     parser.add_argument(
@@ -1187,6 +1193,22 @@ if __name__ == "__main__":
         type=int,
         default=8,
         help="The min cluster size for hdbscan cluster for multimer.",
+    )
+    
+    # MSA random sample params
+    parser.add_argument(
+        "--random_msa_sample",
+        action="store_true",
+        default=False,
+        help="""Enable random sampling for MSA instead of deterministic sampling.
+        When enabled, sequences will be randomly selected from MSA clusters.""",
+    )
+    parser.add_argument(
+        "--msa_random_seed",
+        type=int,
+        default=None,
+        help="""Random seed for MSA sampling. Only effective when random_msa_sample is enabled.
+        If None, sampling will use a random seed. Useful for reproducible random sampling.""",
     )
 
     args = parser.parse_args()
