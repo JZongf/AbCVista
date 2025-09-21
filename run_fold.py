@@ -1011,7 +1011,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--temp_dir",
         type=str,
-        default="/tmp/AbCFold",
+        default="/tmp/AbCVista",
         help="Path to directory containing temporary files.",
     )
     parser.add_argument(
