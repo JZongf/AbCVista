@@ -10,7 +10,7 @@ from utils.database import (
     heavy_ab_database_path,
     light_ab_database_path,
 )
-from utils.get_msa_utils import find_sequences, filter_by_diff, hamming_distance, hamming_distance_bulk
+from utils.get_msa_utils import find_sequences, hamming_distance
 from utils.get_chain_info import AntiBody
 from concurrent.futures import ProcessPoolExecutor, as_completed, ThreadPoolExecutor
 import multiprocessing as mp
@@ -71,7 +71,6 @@ def get_msa_by_regions_length_substitution(
     output_path = os.path.join(tmp_dir, "{}_{}_msa.fas".format(database, name))
 
     regioned_seq = seq.replace("-", "")
-    query_parts = regioned_seq.split("*")
     target_lengths = [len(region) for region in regioned_seq.split("*")]
     seq_without_region = regioned_seq.replace("*", "")
     # A tolerance of 0.1 is allowed by default in the CDR3 region. It might be necessary to check if tolerance should be applied to the light chain.
@@ -90,48 +89,39 @@ def get_msa_by_regions_length_substitution(
             for i in range(len(target_lengths))
         ]
 
-    # 预先计算差值矩阵，避免循环中重复计算
     if chain_type == "H":
-        length_df = heavy_lengths_sub_list[database_index]
+        target_lengths_df = np.tile(target_lengths, (heavy_seqs_sub_list[database_index].shape[0], 1))
     else:
-        length_df = light_lengths_sub_list[database_index]
-    if isinstance(length_df, pd.DataFrame):
-        length_arr = length_df.values
-    else:
-        length_arr = np.asarray(length_df)
-    target_vec = np.asarray(target_lengths)
-    diff_arr = np.abs(length_arr - target_vec)
+        target_lengths_df = np.tile(target_lengths, (light_seqs_sub_list[database_index].shape[0], 1))
+        
+    target_df = pd.DataFrame(target_lengths_df, columns=regions)
     
     while len(target_names) < minmin_seqs and cycle < 50:
         if chain_type == "H":
-            target_seqs = filter_by_diff(
+            target_seqs = find_sequences(
                 seqs_df=heavy_seqs_sub_list[database_index],
-                diff_arr=diff_arr,
+                length_df=heavy_lengths_sub_list[database_index],
+                target_df=target_df,
                 tolerance=tolerance,
             )
         else:
-            target_seqs = filter_by_diff(
+            target_seqs = find_sequences(
                 seqs_df=light_seqs_sub_list[database_index],
-                diff_arr=diff_arr,
+                length_df=light_lengths_sub_list[database_index],
+                target_df=target_df,
                 tolerance=tolerance,
             )
 
         target_seqs = target_seqs.to_numpy().tolist()
         if len(target_seqs) >= minmin_seqs or cycle == 49:
             if len(target_seqs) > maxmin_seqs:
-                # CDR3 的汉明距离批量过滤，保持顺序
-                q = query_parts[5]
-                q_len = len(q)
-                cand_idx = [i for i, seq in enumerate(target_seqs) if len(seq[5]) == q_len]
-                if cand_idx:
-                    cand = [target_seqs[i][5] for i in cand_idx]
-                    dists = hamming_distance_bulk(cand, q)
-                    cutoff = int(target_lengths[5] * 0.8 * 2)
-                    target_seqs = [
-                        target_seqs[cand_idx[pos]]
-                        for pos in range(len(cand_idx))
-                        if dists[pos] <= cutoff
-                    ]
+                target_seqs = [
+                    seq
+                    for seq in target_seqs
+                    if len(regioned_seq.split("*")[5]) == len(seq[5])
+                    and hamming_distance(regioned_seq.split("*")[5], seq[5])
+                    <= int(target_lengths[5] * 0.8 * 2)
+                ]
             target_seqs = target_seqs[:maxmin_seqs]
             target_seqs = ["".join(seq) for seq in target_seqs]
             target_seqs = [seq_without_region] + target_seqs

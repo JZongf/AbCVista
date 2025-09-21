@@ -10,7 +10,7 @@ from utils.fasta import (
 )
 from utils.align import run_alignment, delete_msa_by_first_seq
 from utils.database import fv_length_database_path
-from utils.get_msa_utils import find_sequences, filter_by_diff, hamming_distance, hamming_distance_bulk
+from utils.get_msa_utils import find_sequences, hamming_distance
 from utils.get_chain_info import AntiBody, PairAntiBody
 from utils.database import regions, regions_fv
 from concurrent.futures import ProcessPoolExecutor, as_completed, ThreadPoolExecutor
@@ -132,7 +132,6 @@ def get_msa_by_regions_length_paired(
         tmp_dir, "pair_{}_msa_{}_{}.fas".format(light_antibody.name, scheme, random.randint(1,10000))
     )
     regioned_seq = seq.replace("-", "")
-    query_parts = regioned_seq.split("*")
     target_lengths = [len(region) for region in regioned_seq.split("*")]
     # tolerance[5] += int(target_lengths[5] * 0.1) # Default tolerance of 0.1 is allowed
 
@@ -150,38 +149,27 @@ def get_msa_by_regions_length_paired(
             for i in range(len(target_lengths))
         ]
 
-    # 预先计算长度差值矩阵，避免循环中重复 |length - target| 计算
-    if isinstance(fv_lengths, pd.DataFrame):
-        length_arr = fv_lengths.values
-    else:
-        length_arr = np.asarray(fv_lengths)
-    target_vec = np.asarray(target_lengths)
-    diff_arr = np.abs(length_arr - target_vec)
+    target_lengths_df = np.tile(target_lengths, (fv_seqs.shape[0], 1))
+    target_df = pd.DataFrame(target_lengths_df, columns=regions_fv)
 
     while len(target_names) < minmin_seqs and cycle < 100:
-        # 使用预计算差值快速筛选（结果与 find_sequences 完全一致）
-        target_seqs = filter_by_diff(
+        target_seqs = find_sequences(
             seqs_df=fv_seqs,
-            diff_arr=diff_arr,
+            length_df=fv_lengths,
+            target_df=target_df,
             tolerance=tolerance,
         )
         target_seqs = target_seqs.to_numpy().tolist()
 
         if len(target_seqs) >= minmin_seqs or cycle == 99:
             if len(target_seqs) > minmax_seqs:
-                # 针对 CDR3 的汉明距离过滤做批量计算，保持顺序
-                q = query_parts[5]
-                q_len = len(q)
-                cand_idx = [i for i, seq in enumerate(target_seqs) if len(seq[5]) == q_len]
-                if cand_idx:
-                    cand = [target_seqs[i][5] for i in cand_idx]
-                    dists = hamming_distance_bulk(cand, q)
-                    cutoff = int(target_lengths[5] * 0.8 * 2)
-                    target_seqs = [
-                        target_seqs[cand_idx[pos]]
-                        for pos in range(len(cand_idx))
-                        if dists[pos] <= cutoff
-                    ]
+                target_seqs = [
+                    seq
+                    for seq in target_seqs
+                    if len(regioned_seq.split("*")[5]) == len(seq[5])
+                    and hamming_distance(regioned_seq.split("*")[5], seq[5])
+                    <= int(target_lengths[5] * 0.8 * 2)
+                ]
             target_seqs_heavy = ["".join(seq[:7]) for seq in target_seqs]
             target_seqs_light = ["".join(seq[7:]) for seq in target_seqs]
 
@@ -406,9 +394,10 @@ def getmsa(args, antibody_list):
                 if idx_start > 100000000:
                     idx_start = 0
                 
-    # 使用线程池处理 inner_pair，避免额外的进程创建开销（结果不变）
-    from concurrent.futures import ThreadPoolExecutor as _TPE
-    with _TPE(max_workers=cpus) as executor:
+
+    with ProcessPoolExecutor(
+        max_workers=cpus, mp_context=mp.get_context("spawn")
+    ) as executor:
         features = [
             executor.submit(
                 search_msas_by_pair,
