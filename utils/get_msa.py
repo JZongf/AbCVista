@@ -34,7 +34,7 @@ def get_msa(args, antibody_list):
         # 配对：paired 与 inner_pair
         paired = antibody.get_all_antibodies()
         if paired:
-            total_tasks += sum(1 for p in paired if p is not None and p.is_paired())
+            total_tasks += sum(1 for p in paired if p is not None)
         total_tasks += sum(1 for ip in antibody.inner_pair_antibody if ip is not None)
 
     with  dynamic_executor_context(process_threshold=1, max_workers=args.cpus) as dynamic_executor:
