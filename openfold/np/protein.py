@@ -321,7 +321,7 @@ def add_pdb_headers(prot: Protein, pdb_str: str) -> str:
 
 
 
-def load_antibody_numbering(alignment_dir: str, chain_names: list) -> Optional[Dict[str, Dict[str, Any]]]:
+def load_antibody_numbering(alignment_dir: str, chain_names: list) -> Optional[Dict[str, Dict[int, Tuple[int, str]]]]:
     """
     加载抗体残基编号映射
     
@@ -330,13 +330,13 @@ def load_antibody_numbering(alignment_dir: str, chain_names: list) -> Optional[D
         chain_names: 链名称列表
     
     Returns:
-        字典，键为链名，值包含残基编号映射以及链类型
-        返回格式: {chain_name: {"numbering": {residue_index: (number, insertion_code)}, "chain_type": str}}
+        字典，键为链名，值为残基位置到编号的映射
+        返回格式: {chain_name: {residue_index: (number, insertion_code)}}
     """
     if not alignment_dir or not os.path.exists(alignment_dir):
         return None
     
-    numbering_map: Dict[str, Dict[str, Any]] = {}
+    numbering_map = {}
     
     for chain_name in chain_names:
         chain_dir = os.path.join(alignment_dir, chain_name)
@@ -350,13 +350,13 @@ def load_antibody_numbering(alignment_dir: str, chain_names: list) -> Optional[D
         try:
             with open(numbers_file, 'r') as f:
                 lines = f.readlines()
-
+            
             # 解析编号映射
             # numbers.txt 格式：每行一个编号，行号对应残基位置
-            chain_numbering: Dict[int, Tuple[int, str]] = {}
+            chain_numbering = {}
             for idx, line in enumerate(lines):
                 num_str = line.strip()
-
+                
                 if num_str:  # 跳过空行
                     # 分离数字和插入编码
                     insertion_code = ""
@@ -382,11 +382,10 @@ def load_antibody_numbering(alignment_dir: str, chain_names: list) -> Optional[D
             # 读取区域信息以处理 FRONT 和 BACK
             with open(region_file, 'r') as f:
                 region_data = json.load(f)
-
+            
             front_offset = region_data.get("FRONT", [0, 0])[0]
             back_start = region_data.get("BACK", [0, 0])[0]
-            chain_type = region_data.get("chain_type")
-
+            
             # 应用偏移
             adjusted_numbering = {}
             for idx, (num, ins_code) in chain_numbering.items():
@@ -401,24 +400,19 @@ def load_antibody_numbering(alignment_dir: str, chain_names: list) -> Optional[D
                     # 可变区部分，保持原编号
                     adjusted_numbering[idx] = (num, ins_code)
             
-            chain_entry: Dict[str, Any] = {
-                "numbering": adjusted_numbering,
-                "chain_type": chain_type,
-            }
-
-            if adjusted_numbering or chain_type in ("H", "L"):
-                numbering_map[chain_name] = chain_entry
-
+            if adjusted_numbering:
+                numbering_map[chain_name] = adjusted_numbering
+                
         except Exception as e:
             # 出错时静默失败，使用默认编号
             continue
-
+    
     return numbering_map if numbering_map else None
 
 
 def apply_numbering_to_relaxed_pdbs(output_directory: str, alignment_dir: str, tags: list) -> None:
     """
-    在预测输出完成后，为所有 PDB 文件替换残基编号
+    在 relax 完成后，替换 PDB 文件中的残基编号
     
     Args:
         output_directory: 输出目录路径
@@ -433,114 +427,66 @@ def apply_numbering_to_relaxed_pdbs(output_directory: str, alignment_dir: str, t
         if not numbering_map_all:
             return
         
-        # 处理所有预测产生的 PDB 文件
-        pdb_files = set(glob.glob(os.path.join(output_directory, "*.pdb")))
-
-        for pdb_file in sorted(pdb_files):
+        # 处理所有 relaxed PDB 文件
+        relaxed_pdbs = glob.glob(os.path.join(output_directory, "*_relaxed.pdb"))
+        
+        for pdb_file in relaxed_pdbs:
             # 读取 PDB 文件
             with open(pdb_file, 'r') as f:
                 lines = f.readlines()
-
-            # 识别文件中的链顺序
-            chain_id_sequence = []
-            for line in lines:
-                if line.startswith("ATOM"):
-                    cid = line[21:22]
-                    if cid and cid not in chain_id_sequence:
-                        chain_id_sequence.append(cid)
-
-            chain_id_to_tag = {}
-            for idx, cid in enumerate(chain_id_sequence):
-                if idx < len(tags):
-                    chain_id_to_tag[cid] = tags[idx]
-
-            # 计算可用的链类型映射
-            chain_type_counts: Dict[str, int] = {}
-            candidate_chain_types: Dict[str, str] = {}
-            for cid, tag in chain_id_to_tag.items():
-                chain_info = numbering_map_all.get(tag)
-                if not chain_info:
-                    continue
-                chain_type = chain_info.get("chain_type")
-                if chain_type in ("H", "L"):
-                    candidate_chain_types[cid] = chain_type
-                    chain_type_counts[chain_type] = chain_type_counts.get(chain_type, 0) + 1
-
-            existing_chain_ids = set(chain_id_sequence)
-            chain_id_replacements: Dict[str, str] = {}
-            for cid, chain_type in candidate_chain_types.items():
-                if chain_type_counts.get(chain_type, 0) != 1:
-                    continue
-                new_chain_id = chain_type
-                if new_chain_id != cid and new_chain_id in existing_chain_ids:
-                    continue
-                chain_id_replacements[cid] = new_chain_id
-
+            
             # 替换编号
             new_lines = []
             chain_residue_counter = {}  # 每条链单独计数
             last_residue_id = {}  # 记录每条链的上一个残基
-
+            
             for line in lines:
                 if line.startswith("ATOM"):
-                    original_chain_id = line[21:22]
+                    chain_id = line[21:22]
                     curr_residue_num = line[22:26].strip()
-
+                    
                     # 初始化链计数器
-                    if original_chain_id not in chain_residue_counter:
-                        chain_residue_counter[original_chain_id] = -1
-                        last_residue_id[original_chain_id] = None
-
+                    if chain_id not in chain_residue_counter:
+                        chain_residue_counter[chain_id] = -1
+                        last_residue_id[chain_id] = None
+                    
                     # 检查是否是新残基
-                    if curr_residue_num != last_residue_id[original_chain_id]:
-                        chain_residue_counter[original_chain_id] += 1
-                        last_residue_id[original_chain_id] = curr_residue_num
-
+                    if curr_residue_num != last_residue_id[chain_id]:
+                        chain_residue_counter[chain_id] += 1
+                        last_residue_id[chain_id] = curr_residue_num
+                    
                     # 根据链 ID 找到对应的 tag
-                    tag = chain_id_to_tag.get(original_chain_id)
-                    chain_info = numbering_map_all.get(tag) if tag else None
-                    chain_numbering = None
-                    if chain_info:
-                        chain_numbering = chain_info.get("numbering")
-
-                    if chain_numbering:
-                        residue_idx = chain_residue_counter[original_chain_id]
-
-                        if residue_idx in chain_numbering:
-                            num, ins_code = chain_numbering[residue_idx]
-                            # 格式化新编号（右对齐4位 + 1位插入编码）
-                            new_num_str = f"{num:>4}{ins_code:<1}"
-                            # 替换行中的编号部分（22-27 列）
-                            line = line[:22] + new_num_str + line[27:]
-
-                    # 根据链类型决定是否替换链 ID
-                    new_chain_id = chain_id_replacements.get(original_chain_id)
-                    if new_chain_id:
-                        line = line[:21] + new_chain_id + line[22:]
-
-                elif line.startswith("TER"):
-                    original_chain_id = line[21:22]
-                    if original_chain_id in chain_residue_counter:
-                        tag = chain_id_to_tag.get(original_chain_id)
-                        chain_info = numbering_map_all.get(tag) if tag else None
-                        chain_numbering = None
-                        if chain_info:
-                            chain_numbering = chain_info.get("numbering")
-
-                        if chain_numbering:
-                            residue_idx = chain_residue_counter[original_chain_id]
-
+                    chain_idx = ord(chain_id) - ord('A')
+                    if chain_idx < len(tags):
+                        tag = tags[chain_idx]
+                        if tag in numbering_map_all:
+                            chain_numbering = numbering_map_all[tag]
+                            residue_idx = chain_residue_counter[chain_id]
+                            
                             if residue_idx in chain_numbering:
                                 num, ins_code = chain_numbering[residue_idx]
+                                # 格式化新编号（右对齐4位 + 1位插入编码）
                                 new_num_str = f"{num:>4}{ins_code:<1}"
+                                # 替换行中的编号部分（22-27 列）
                                 line = line[:22] + new_num_str + line[27:]
-
-                    new_chain_id = chain_id_replacements.get(original_chain_id)
-                    if new_chain_id:
-                        line = line[:21] + new_chain_id + line[22:]
-
+                
+                elif line.startswith("TER"):
+                    chain_id = line[21:22]
+                    if chain_id in chain_residue_counter:
+                        chain_idx = ord(chain_id) - ord('A')
+                        if chain_idx < len(tags):
+                            tag = tags[chain_idx]
+                            if tag in numbering_map_all:
+                                chain_numbering = numbering_map_all[tag]
+                                residue_idx = chain_residue_counter[chain_id]
+                                
+                                if residue_idx in chain_numbering:
+                                    num, ins_code = chain_numbering[residue_idx]
+                                    new_num_str = f"{num:>4}{ins_code:<1}"
+                                    line = line[:22] + new_num_str + line[27:]
+                
                 new_lines.append(line)
-
+            
             # 写回文件
             with open(pdb_file, 'w') as f:
                 f.writelines(new_lines)
