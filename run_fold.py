@@ -667,7 +667,8 @@ def interface(args):
                 dist_rank_list.append(rank)
 
             # Write the output
-            relax_tasks = []  # 收集所有需要 relax 的任务
+            relax_tasks = []  # Collect relaxation tasks
+            files_to_renumber = []  # All output structure files (unrelaxed + relaxed)
             
             for index, out in enumerate(outputs_list):
 
@@ -692,50 +693,15 @@ def interface(args):
                     output_directory, f"{output_name}{unrelaxed_file_suffix}"
                 )
                 
-                # 加载抗体残基编号映射（如果存在）
-                numbering_map = None
-                try:
-                    # 尝试加载所有链的编号映射并合并
-                    all_chain_numbering = protein.load_antibody_numbering(alignment_dir, tags)
-                    
-                    if all_chain_numbering:
-                        # 合并所有链的编号映射，需要根据链的位置调整索引
-                        numbering_map = {}
-                        chain_starts = []
-                        current_pos = 0
-
-                        # 计算每条链的起始位置
-                        if "region_index" in feature_dict:
-                            for region in feature_dict["region_index"]:
-                                region_data = region[0] if isinstance(region, list) else region
-                                chain_starts.append(current_pos)
-                                if "length" in region_data:
-                                    current_pos += region_data["length"]
-                                elif "FR4" in region_data:
-                                    current_pos += region_data["FR4"][1]
-                        
-                        # 应用每条链的编号映射
-                        for chain_idx, chain_name in enumerate(tags):
-                            # load_antibody_numbering returns a mapping: {local_idx: (num, ins_code)}
-                            chain_numbering = all_chain_numbering.get(chain_name)
-                            if not chain_numbering:
-                                continue
-                            if chain_idx < len(chain_starts):
-                                offset = chain_starts[chain_idx]
-                                for local_idx, (num, ins_code) in chain_numbering.items():
-                                    global_idx = offset + local_idx
-                                    numbering_map[global_idx] = (num, ins_code)
-                except Exception as e:
-                    # 如果加载失败，静默继续，使用默认编号
-                    numbering_map = None
-
                 with open(unrelaxed_output_path, "w") as fp:
                     if args.cif_output:
                         fp.write(protein.to_modelcif(unrelaxed_protein))
                     else:
-                        fp.write(protein.to_pdb(unrelaxed_protein, numbering_map))
+                        fp.write(protein.to_pdb(unrelaxed_protein))
 
                 logger.info(f"Output written to {unrelaxed_output_path}...")
+                # Record for post-processing residue renumbering
+                files_to_renumber.append(unrelaxed_output_path)
 
                 # save msas
                 if args.save_used_msas:
@@ -767,9 +733,9 @@ def interface(args):
 
                     logger.info(f"Model output written to {output_dict_path}...")
 
-                # 准备 relax 任务（不在这里执行，而是收集起来）
+                # Prepare relaxation task (collect only, run later in parallel)
                 if not args.skip_relaxation and int(rank_list[index]) < 5:
-                    # 保存蛋白质结构到临时 pickle 文件
+                    # Save protein to a temporary pickle for relaxation
                     temp_pkl_dir = os.path.join(args.output_dir, "temp_relax_pkl")
                     if not os.path.exists(temp_pkl_dir):
                         os.makedirs(temp_pkl_dir)
@@ -780,7 +746,7 @@ def interface(args):
                     with open(pkl_path, 'wb') as f:
                         pickle.dump(unrelaxed_protein, f)
                     
-                    # 添加到 relax 任务列表
+                    # Add to relaxation task list
                     relax_tasks.append({
                         'pkl_path': pkl_path,
                         'output_name': output_name + "_ranked{}_dranked{}".format(
@@ -792,7 +758,7 @@ def interface(args):
                         'cif_output': args.cif_output,
                     })
             
-            # 批量并行执行所有 relax 任务
+            # Batch relaxation of collected tasks
             if relax_tasks:
                 logger.info(f"Starting parallel relaxation for {len(relax_tasks)} structures...")
                 parallel_relax_proteins(
@@ -802,8 +768,23 @@ def interface(args):
                     max_workers=args.relax_max_workers
                 )
                 
-                # 在 relax 完成后应用自定义编号
-                protein.apply_numbering_to_relaxed_pdbs(output_directory, alignment_dir, tags)
+                # After relaxation, add relaxed files and apply residue renumbering
+                try:
+                    for t in relax_tasks:
+                        suffix = "_relaxed.cif" if t.get('cif_output') else "_relaxed.pdb"
+                        files_to_renumber.append(os.path.join(t['output_directory'], f"{t['output_name']}{suffix}"))
+                    if args.renumber_antibody and files_to_renumber:
+                        protein.apply_numbering_to_structures(files_to_renumber, alignment_dir, tags)
+                except Exception:
+                    # Silently ignore errors to not block the main flow
+                    pass
+            else:
+                # No relaxation; renumber unrelaxed structures only
+                try:
+                    if args.renumber_antibody and files_to_renumber:
+                        protein.apply_numbering_to_structures(files_to_renumber, alignment_dir, tags)
+                except Exception:
+                    pass
 
             if args.save_seqlogo:
                 with ProcessPoolExecutor(max_workers=args.cpus) as executor:
@@ -1007,6 +988,12 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Output predicted models in ModelCIF format instead of PDB format (default)",
+    )
+    parser.add_argument(
+        "--renumber_antibody",
+        action="store_true",
+        default=False,
+        help="Whether to renumber output structures using antibody numbering and set chain IDs to H/L when available.",
     )
     parser.add_argument(
         "--temp_dir",

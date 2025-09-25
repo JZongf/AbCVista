@@ -23,7 +23,7 @@ import os
 import json
 
 from openfold.np import residue_constants
-from Bio.PDB import PDBParser
+from Bio.PDB import PDBParser, MMCIFParser
 import numpy as np
 import modelcif
 import modelcif.model
@@ -321,199 +321,396 @@ def add_pdb_headers(prot: Protein, pdb_str: str) -> str:
 
 
 
-def load_antibody_numbering(alignment_dir: str, chain_names: list) -> Optional[Dict[str, Dict[int, Tuple[int, str]]]]:
+def load_antibody_numbering(alignment_dir: str, chain_names: list) -> Optional[Dict[str, Any]]:
     """
-    加载抗体残基编号映射
-    
+    Load antibody residue numbering and optional chain type overrides.
+
     Args:
-        alignment_dir: 对齐文件目录路径
-        chain_names: 链名称列表
-    
+        alignment_dir: Alignment/numbering directory path.
+        chain_names: Chain name list.
+
     Returns:
-        字典，键为链名，值为残基位置到编号的映射
-        返回格式: {chain_name: {residue_index: (number, insertion_code)}}
+        A dict with two mappings (or None if not available):
+          - 'numbering_map': {chain_name: {res_index: (number, insertion_code)}}
+          - 'chain_type_map': {chain_name: 'H' or 'L'} if chain_type is annotated
     """
     if not alignment_dir or not os.path.exists(alignment_dir):
         return None
     
     numbering_map = {}
+    chain_type_map = {}
     
     for chain_name in chain_names:
         chain_dir = os.path.join(alignment_dir, chain_name)
-        numbers_file = os.path.join(chain_dir, "numbers.txt")  # 直接在链目录下，不是在 msas 子目录
+        numbers_file = os.path.join(chain_dir, "numbers.txt")  # numbers are directly under chain dir
         region_file = os.path.join(chain_dir, "region_index.json")
         
         if not os.path.exists(numbers_file) or not os.path.exists(region_file):
             continue
             
-        # 读取编号文件
+        # Read numbering file
         try:
             with open(numbers_file, 'r') as f:
                 lines = f.readlines()
             
-            # 解析编号映射
-            # numbers.txt 格式：每行一个编号，行号对应残基位置
+            # Parse numbering mapping
+            # numbers.txt format: each line is a number, line index is residue position (0-based)
             chain_numbering = {}
             for idx, line in enumerate(lines):
                 num_str = line.strip()
                 
-                if num_str:  # 跳过空行
-                    # 分离数字和插入编码
+                if num_str:  # skip empty lines
+                    # split number and insertion code suffix
                     insertion_code = ""
                     num_part = num_str
                     
-                    # 检查是否有字母后缀（插入编码）
+                    # check if there is an alphabetical suffix (insertion code)
                     i = len(num_str) - 1
                     while i >= 0 and num_str[i].isalpha():
                         i -= 1
                     
                     if i >= 0 and i < len(num_str) - 1:
-                        # 有字母后缀
+                        # has letter suffix
                         num_part = num_str[:i+1]
                         insertion_code = num_str[i+1:]
                     elif i < 0 and num_str.isalpha():
-                        # 整个都是字母，跳过
+                        # all letters, skip
                         continue
                     
                     if num_part.isdigit():
-                        # idx 已经是 0-indexed (enumerate 从 0 开始)
+                        # idx is already 0-indexed (enumerate)
                         chain_numbering[idx] = (int(num_part), insertion_code)
             
-            # 读取区域信息以处理 FRONT 和 BACK
+            # Read region info to handle FRONT and BACK and chain_type
             with open(region_file, 'r') as f:
                 region_data = json.load(f)
             
             front_offset = region_data.get("FRONT", [0, 0])[0]
             back_start = region_data.get("BACK", [0, 0])[0]
+            # capture optional chain type override (e.g., 'H' or 'L')
+            ctype = region_data.get("chain_type")
+            if isinstance(ctype, str) and ctype in {"H", "L"}:
+                chain_type_map[chain_name] = ctype
             
-            # 应用偏移
+            # Apply offsets
             adjusted_numbering = {}
             for idx, (num, ins_code) in chain_numbering.items():
-                # 根据位置调整编号
+                # adjust numbering by position
                 if idx < front_offset:
-                    # FRONT 部分，编号递减
+                    # FRONT region: decrement numbering
                     adjusted_numbering[idx] = (num - (front_offset - idx), ins_code)
                 elif back_start > 0 and idx >= back_start:
-                    # BACK 部分，编号递增
+                    # BACK region: increment numbering
                     adjusted_numbering[idx] = (num + (idx - back_start + 1), ins_code)
                 else:
-                    # 可变区部分，保持原编号
+                    # variable region: keep original numbering
                     adjusted_numbering[idx] = (num, ins_code)
             
             if adjusted_numbering:
                 numbering_map[chain_name] = adjusted_numbering
                 
         except Exception as e:
-            # 出错时静默失败，使用默认编号
+            # On error, silently continue without overriding
             continue
     
-    return numbering_map if numbering_map else None
+    if not numbering_map:
+        return None
+    return {"numbering_map": numbering_map, "chain_type_map": chain_type_map}
 
 
-def apply_numbering_to_relaxed_pdbs(output_directory: str, alignment_dir: str, tags: list) -> None:
+def apply_numbering_to_structures(
+    file_paths: Sequence[str],
+    alignment_dir: str,
+    tags: Sequence[str],
+    *,
+    max_workers: Optional[int] = 6,
+) -> None:
     """
-    在 relax 完成后，替换 PDB 文件中的残基编号
-    
+    Apply antibody residue numbering to a list of structure files using Biopython.
+
+    Changes compared to the previous implementation:
+    - Accepts a list of file paths (PDB or CIF) instead of a directory.
+    - Uses Biopython to derive residue order and original numbering to build a mapping,
+      then applies in-place replacements on the original files.
+    - Supports mmCIF renumbering by updating atom_site seq IDs and optional insertion codes.
+    - Supports multithreaded processing across files.
+    - If region_index.json contains "chain_type" of 'H' or 'L' for a chain tag, rename
+      chain IDs in outputs to 'H' or 'L' accordingly (PDB: chain column; CIF: asym ID).
+
     Args:
-        output_directory: 输出目录路径
-        alignment_dir: 对齐文件目录路径
-        tags: 链名称列表
+        file_paths: List of structure files to renumber (.pdb or .cif).
+        alignment_dir: Path to directory containing numbering/alignment info.
+        tags: Chain name list ordered to correspond to chains A, B, C, ...
+        max_workers: Number of threads to use; defaults to CPU count.
     """
-    import glob
-    
-    try:
-        # 加载编号映射
-        numbering_map_all = load_antibody_numbering(alignment_dir, tags)
-        if not numbering_map_all:
-            return
-        
-        # 处理所有 relaxed PDB 文件
-        relaxed_pdbs = glob.glob(os.path.join(output_directory, "*_relaxed.pdb"))
-        
-        for pdb_file in relaxed_pdbs:
-            # 读取 PDB 文件
-            with open(pdb_file, 'r') as f:
+    import shlex
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _safe_int(x: Any, default: int = 0) -> int:
+        try:
+            return int(x)
+        except Exception:
+            return default
+
+    def _build_mapping_from_structure(structure, tags_local, numbering_map_all_local):
+        """Build mapping from (chain, old seq, old icode) to (new seq, new icode).
+
+        Returns: {(chain_id, old_resseq:int, old_icode:str): (new_resseq:int, new_icode:str)}
+        Only standard residues (hetero flag == ' ') are considered.
+        """
+        mapping = {}
+        upper = string.ascii_uppercase
+
+        # Support multi-model files, but process the first model (OpenFold outputs single model)
+        models = list(structure.get_models())
+        if not models:
+            return mapping
+        model = models[0]
+
+        for chain in model:
+            chain_id = str(chain.id) if isinstance(chain.id, str) else str(chain.id)
+            if len(chain_id) == 0:
+                continue
+            cid = chain_id[0]
+            if cid not in upper:
+                continue
+            chain_idx = upper.index(cid)
+            if chain_idx >= len(tags_local):
+                continue
+            tag = tags_local[chain_idx]
+            chain_numbering = numbering_map_all_local.get(tag, {}) if numbering_map_all_local else {}
+
+            res_counter = 0
+            for residue in chain:
+                het, old_resseq, old_icode = residue.get_id()
+                if het != ' ':
+                    # Renumber only standard residues
+                    continue
+                # Get new numbering if available
+                if res_counter in chain_numbering:
+                    new_num, new_icode = chain_numbering[res_counter]
+                else:
+                    new_num, new_icode = old_resseq, old_icode
+                # Normalize new fields
+                new_num = _safe_int(new_num, old_resseq)
+                new_icode = (new_icode if new_icode else ' ')
+                if not isinstance(new_icode, str) or len(new_icode) == 0:
+                    new_icode = ' '
+
+                mapping[(cid, int(old_resseq), old_icode if old_icode else ' ')] = (
+                    int(new_num), new_icode[:1]
+                )
+                res_counter += 1
+        return mapping
+
+    def _parse_structure(file_path: str):
+        # Choose parser by file extension
+        ext = os.path.splitext(file_path)[1].lower()
+        try:
+            if ext == '.pdb':
+                parser = PDBParser(QUIET=True)
+            elif ext == '.cif' or ext == '.mmcif':
+                parser = MMCIFParser(QUIET=True)
+            else:
+                return None
+            return parser.get_structure("renum", file_path)
+        except Exception:
+            return None
+
+    def _renumber_pdb_inplace(file_path: str, mapping: Dict[Tuple[str, int, str], Tuple[int, str]], chain_overrides_local: Optional[Dict[str, str]] = None):
+        try:
+            with open(file_path, 'r') as f:
                 lines = f.readlines()
-            
-            # 替换编号
+
             new_lines = []
-            chain_residue_counter = {}  # 每条链单独计数
-            last_residue_id = {}  # 记录每条链的上一个残基
-            
             for line in lines:
-                if line.startswith("ATOM"):
+                if line.startswith('ATOM') or line.startswith('TER'):
                     chain_id = line[21:22]
-                    curr_residue_num = line[22:26].strip()
-                    
-                    # 初始化链计数器
-                    if chain_id not in chain_residue_counter:
-                        chain_residue_counter[chain_id] = -1
-                        last_residue_id[chain_id] = None
-                    
-                    # 检查是否是新残基
-                    if curr_residue_num != last_residue_id[chain_id]:
-                        chain_residue_counter[chain_id] += 1
-                        last_residue_id[chain_id] = curr_residue_num
-                    
-                    # 根据链 ID 找到对应的 tag
-                    chain_idx = ord(chain_id) - ord('A')
-                    if chain_idx < len(tags):
-                        tag = tags[chain_idx]
-                        if tag in numbering_map_all:
-                            chain_numbering = numbering_map_all[tag]
-                            residue_idx = chain_residue_counter[chain_id]
-                            
-                            if residue_idx in chain_numbering:
-                                num, ins_code = chain_numbering[residue_idx]
-                                # Safe formatting: clamp to 4-digit resSeq and 1-char iCode
-                                try:
-                                    num_int = int(num)
-                                except Exception:
-                                    num_int = 0
-                                num_str = f"{num_int:>4}"[-4:]
-                                icode = (ins_code if ins_code else " ")[:1]
-                                new_num_str = num_str + icode
-                                # Replace the resSeq+iCode region (columns 23-27)
-                                line = line[:22] + new_num_str + line[27:]
-                
-                elif line.startswith("TER"):
-                    chain_id = line[21:22]
-                    if chain_id in chain_residue_counter:
-                        chain_idx = ord(chain_id) - ord('A')
-                        if chain_idx < len(tags):
-                            tag = tags[chain_idx]
-                            if tag in numbering_map_all:
-                                chain_numbering = numbering_map_all[tag]
-                                residue_idx = chain_residue_counter[chain_id]
-                                
-                                if residue_idx in chain_numbering:
-                                    num, ins_code = chain_numbering[residue_idx]
-                                    try:
-                                        num_int = int(num)
-                                    except Exception:
-                                        num_int = 0
-                                    num_str = f"{num_int:>4}"[-4:]
-                                    icode = (ins_code if ins_code else " ")[:1]
-                                    new_num_str = num_str + icode
-                                    line = line[:22] + new_num_str + line[27:]
-                
+                    old_num_str = line[22:26]
+                    old_icode = line[26:27]
+                    try:
+                        old_num = int(old_num_str)
+                    except Exception:
+                        old_num = None
+
+                    if old_num is not None:
+                        key = (chain_id, old_num, old_icode if old_icode.strip() else ' ')
+                        if key in mapping:
+                            new_num, new_icode = mapping[key]
+                            num_str = f"{new_num:>4}"[-4:]
+                            icode = (new_icode if new_icode else ' ')[:1]
+                            line = line[:22] + num_str + icode + line[27:]
+                    # Apply chain ID override if any
+                    if chain_overrides_local and chain_id in chain_overrides_local:
+                        new_chain = chain_overrides_local[chain_id]
+                        if isinstance(new_chain, str) and len(new_chain) >= 1:
+                            line = line[:21] + new_chain[0] + line[22:]
                 new_lines.append(line)
-            
-            # 写回文件
-            with open(pdb_file, 'w') as f:
+
+            with open(file_path, 'w') as f:
                 f.writelines(new_lines)
-    
+        except Exception:
+            # Silently ignore errors and continue
+            pass
+
+    def _renumber_cif_inplace(file_path: str, mapping: Dict[Tuple[str, int, str], Tuple[int, str]], chain_overrides_local: Optional[Dict[str, str]] = None):
+        """Replace atom_site residue numbering and insertion codes in mmCIF text in-place.
+        - Prefer updating _atom_site.auth_seq_id / _atom_site.auth_asym_id
+        - Fallback to _atom_site.label_seq_id / _atom_site.label_asym_id if needed
+        - Update _atom_site.pdbx_PDB_ins_code if present
+        Note: To preserve other modelCIF metadata, we modify in place rather than rewrite from parsed objects.
+        """
+        try:
+            with open(file_path, 'r') as f:
+                lines = f.readlines()
+
+            # Locate the atom_site loop
+            i = 0
+            while i < len(lines):
+                if lines[i].strip().lower() == 'loop_':
+                    j = i + 1
+                    headers = []
+                    while j < len(lines):
+                        s = lines[j].lstrip()
+                        if not s.startswith('_'):
+                            break
+                        header_name = s.split()[0]
+                        headers.append(header_name)
+                        j += 1
+
+                    if headers and all(h.startswith('_atom_site.') for h in headers):
+                        # Determine index of key columns
+                        def _idx(names):
+                            for n in names:
+                                if n in headers:
+                                    return headers.index(n)
+                            return None
+
+                        chain_col = _idx(['_atom_site.auth_asym_id', '_atom_site.label_asym_id'])
+                        seq_col = _idx(['_atom_site.auth_seq_id', '_atom_site.label_seq_id'])
+                        icode_col = _idx(['_atom_site.pdbx_PDB_ins_code'])
+
+                        if seq_col is None or chain_col is None:
+                            # Unable to safely renumber within this loop; skip it
+                            i = j
+                            continue
+
+                        # Data rows range: j..k-1
+                        k = j
+                        while k < len(lines):
+                            t = lines[k].lstrip()
+                            if t.startswith('loop_') or t.startswith('_') or t.startswith('save_') or t.startswith('data_') or t.startswith('#'):
+                                break
+                            # Parse a data row and try to replace numbering
+                            tokens = shlex.split(lines[k].strip(), posix=True)
+                            if len(tokens) == len(headers):
+                                chain_id = tokens[chain_col]
+                                # Strip quotes if present
+                                if len(chain_id) >= 2 and ((chain_id[0] == chain_id[-1] == '"') or (chain_id[0] == chain_id[-1] == "'")):
+                                    chain_id = chain_id[1:-1]
+
+                                old_seq = _safe_int(tokens[seq_col], default=None)
+                                old_icode = None
+                                if icode_col is not None and icode_col < len(tokens):
+                                    old_icode = tokens[icode_col]
+                                    if old_icode in {'.', '?'}:
+                                        old_icode = ' '
+                                    # Strip quotes if present
+                                    if isinstance(old_icode, str) and len(old_icode) >= 2 and ((old_icode[0] == old_icode[-1] == '"') or (old_icode[0] == old_icode[-1] == "'")):
+                                        old_icode = old_icode[1:-1]
+
+                                if old_seq is not None and isinstance(chain_id, str) and len(chain_id) > 0:
+                                    cid = chain_id[0]
+                                    key = (cid, int(old_seq), old_icode if old_icode else ' ')
+                                    if key in mapping:
+                                        new_num, new_icode = mapping[key]
+                                        tokens[seq_col] = str(int(new_num))
+                                        if icode_col is not None and icode_col < len(tokens):
+                                            tokens[icode_col] = new_icode if (new_icode and new_icode != ' ') else '?'
+
+                                    # Apply chain ID override if any
+                                    if chain_overrides_local and cid in chain_overrides_local:
+                                        new_chain = chain_overrides_local[cid]
+                                        if isinstance(new_chain, str) and len(new_chain) >= 1:
+                                            tokens[chain_col] = new_chain[0]
+
+                                    lines[k] = ' '.join(tokens) + '\n'
+                            k += 1
+
+                        # Process first atom_site loop only (most files have a single loop)
+                        break
+
+                    i = j
+                else:
+                    i += 1
+
+            with open(file_path, 'w') as f:
+                f.writelines(lines)
+        except Exception:
+            # Silently ignore errors and continue
+            pass
+
+    # Load numbering map and optional chain-type overrides
+    try:
+        loaded = load_antibody_numbering(alignment_dir, list(tags))
     except Exception:
-        # 如果出错，静默失败
-        pass
+        loaded = None
+
+    if not file_paths or not loaded:
+        return
+
+    # Unpack with backward compatibility if signature ever changes
+    if isinstance(loaded, dict) and ('numbering_map' in loaded or 'chain_type_map' in loaded):
+        numbering_map_all = loaded.get('numbering_map', {})
+        chain_type_map_by_tag = loaded.get('chain_type_map', {})
+    else:
+        numbering_map_all = loaded or {}
+        chain_type_map_by_tag = {}
+
+    # Build chain overrides mapping from tag-indexed chain type to file chain IDs A, B, C...
+    chain_overrides = {}
+    upper = string.ascii_uppercase
+    for i, tag in enumerate(list(tags)):
+        if i >= len(upper):
+            break
+        new_c = chain_type_map_by_tag.get(tag)
+        if isinstance(new_c, str) and new_c in {'H', 'L'}:
+            chain_overrides[upper[i]] = new_c
+
+    # Per-file task
+    def _process_one(file_path: str):
+        if not os.path.exists(file_path):
+            return
+        structure = _parse_structure(file_path)
+        if structure is None:
+            return
+        mapping = _build_mapping_from_structure(structure, list(tags), numbering_map_all)
+        if not mapping:
+            return
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == '.pdb':
+            _renumber_pdb_inplace(file_path, mapping, chain_overrides)
+        elif ext == '.cif' or ext == '.mmcif':
+            _renumber_cif_inplace(file_path, mapping, chain_overrides)
+
+    # Parallel processing
+    try:
+        workers = max_workers if (isinstance(max_workers, int) and max_workers and max_workers > 0) else (os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_process_one, p) for p in file_paths]
+            for _ in as_completed(futures):
+                pass
+    except Exception:
+        # Fall back to serial processing
+        for p in file_paths:
+            _process_one(p)
 
 
-def to_pdb(prot: Protein, numbering_map: Optional[Dict[int, Tuple[int, str]]] = None) -> str:
+def to_pdb(prot: Protein) -> str:
     """Converts a `Protein` instance to a PDB string.
 
     Args:
       prot: The protein to convert to PDB.
-      numbering_map: Optional mapping from residue index to (residue_number, insertion_code)
 
     Returns:
       PDB string.
@@ -580,12 +777,6 @@ def to_pdb(prot: Protein, numbering_map: Optional[Dict[int, Tuple[int, str]]] = 
             name = atom_name if len(atom_name) == 4 else f" {atom_name}"
             alt_loc = ""
             insertion_code = ""
-            res_num = residue_index[i]
-            
-            # Apply custom antibody numbering if provided
-            if numbering_map and i in numbering_map:
-                res_num, insertion_code = numbering_map[i]
-            
             occupancy = 1.00
             element = atom_name[
                 0
@@ -597,20 +788,12 @@ def to_pdb(prot: Protein, numbering_map: Optional[Dict[int, Tuple[int, str]]] = 
                 chain_tag = chain_tags[chain_index[i]]
 
             # PDB is a columnar format, every space matters here!
-            # Safe formatting of residue number and insertion code
-            try:
-                res_num_int = int(res_num)
-            except Exception:
-                res_num_int = 0
-            resnum_str = f"{res_num_int:>4}"[-4:]
-            icode_str = (insertion_code if insertion_code else " ")[:1]
-
             atom_line = (
                 f"{record_type:<6}{atom_index:>5} {name:<4}{alt_loc:>1}"
                 #TODO: check this refactor, chose main branch version
                 #f"{res_name_3:>3} {chain_ids[chain_index[i]]:>1}"
                 f"{res_name_3:>3} {chain_tag:>1}"
-                f"{resnum_str}{icode_str}   "
+                f"{residue_index[i]:>4}{insertion_code:>1}   "
                 f"{pos[0]:>8.3f}{pos[1]:>8.3f}{pos[2]:>8.3f}"
                 f"{occupancy:>6.2f}{b_factor:>6.2f}          "
                 f"{element:>2}{charge:>2}"
@@ -627,23 +810,10 @@ def to_pdb(prot: Protein, numbering_map: Optional[Dict[int, Tuple[int, str]]] = 
         if(should_terminate):
             # Close the chain.
             chain_end = "TER"
-            
-            # Determine residue number for TER line
-            ter_res_num = residue_index[i]
-            ter_insertion_code = ""
-            if numbering_map and i in numbering_map:
-                ter_res_num, ter_insertion_code = numbering_map[i]
-            try:
-                ter_res_num_int = int(ter_res_num)
-            except Exception:
-                ter_res_num_int = 0
-            ter_resnum_str = f"{ter_res_num_int:>4}"[-4:]
-            ter_icode_str = (ter_insertion_code if ter_insertion_code else " ")[:1]
-            
             chain_termination_line = (
                 f"{chain_end:<6}{atom_index:>5}      "
                 f"{res_1to3(aatype[i]):>3} "
-                f"{chain_tag:>1}{ter_resnum_str}{ter_icode_str}"
+                f"{chain_tag:>1}{residue_index[i]:>4}"
             )
             pdb_lines.append(chain_termination_line)
             atom_index += 1
