@@ -750,32 +750,35 @@ def run_pipeline(
         iteration += 1
 
     # Check if there are any amide bonds that need to be fixed.
-    pdb_string_init = ret["min_pdb"]
-    fixer = AmideBondFixer(pdb_string_init)
-    pdb_string_checked, info = fixer.process()
-    if pdb_string_checked != None:
-        pdb_string_hydrated = cleanup.fix_pdb(io.StringIO(pdb_string_checked), {})
+    try:
+        pdb_string_init = ret["min_pdb"]
+        fixer = AmideBondFixer(pdb_string_init)
+        pdb_string_checked, info = fixer.process()
+        if pdb_string_checked != None:
+            pdb_string_hydrated = cleanup.fix_pdb(io.StringIO(pdb_string_checked), {})
 
-        ret = _run_one_iteration(
-            pdb_string=pdb_string_hydrated,
-            exclude_residues=[],
-            max_iterations=max_iterations,
-            tolerance=tolerance,
-            stiffness=stiffness,
-            restraint_set=restraint_set,
-            max_attempts=max_attempts,
-            use_gpu=use_gpu,
-            mobile_residue_indices=info["deleted_residues_ids"],
-        )
-        headers = protein.get_pdb_headers(prot)
-        if(len(headers) > 0):
-            ret["min_pdb"] = '\n'.join(['\n'.join(headers), ret["min_pdb"]])
-        
-        prot = protein.from_pdb_string(ret["min_pdb"])
-        if place_hydrogens_every_iteration:
-            pdb_string_hydrated = clean_protein(prot, checks=True)
-        else:
-            pdb_string_hydrated = ret["min_pdb"]
-        ret.update(get_violation_metrics(prot))
-    
+            ret = _run_one_iteration(
+                pdb_string=pdb_string_hydrated,
+                exclude_residues=[],
+                max_iterations=max_iterations,
+                tolerance=tolerance,
+                stiffness=stiffness,
+                restraint_set=restraint_set,
+                max_attempts=max_attempts,
+                use_gpu=use_gpu,
+                mobile_residue_indices=info["deleted_residues_ids"],
+            )
+            headers = protein.get_pdb_headers(prot)
+            if(len(headers) > 0):
+                ret["min_pdb"] = '\n'.join(['\n'.join(headers), ret["min_pdb"]])
+            
+            prot = protein.from_pdb_string(ret["min_pdb"])
+            if place_hydrogens_every_iteration:
+                pdb_string_hydrated = clean_protein(prot, checks=True)
+            else:
+                pdb_string_hydrated = ret["min_pdb"]
+            ret.update(get_violation_metrics(prot))
+    except Exception as e: 
+        logging.warning(f"Amide bond fixer failed: {e}")
+
     return ret
