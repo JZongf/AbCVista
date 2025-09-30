@@ -16,14 +16,16 @@
 """Protein data type."""
 import dataclasses
 import io
-from typing import Any, Sequence, Mapping, Optional, Dict, Tuple
+import tempfile
+import copy
+from typing import Any, Sequence, Mapping, Optional, Dict, Tuple, List
 import re
 import string
 import os
 import json
 
 from openfold.np import residue_constants
-from Bio.PDB import PDBParser, MMCIFParser
+from Bio.PDB import PDBParser, MMCIFParser, PDBIO, MMCIFIO, Select
 import numpy as np
 import modelcif
 import modelcif.model
@@ -41,6 +43,256 @@ PICO_TO_ANGSTROM = 0.01
 PDB_CHAIN_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 PDB_MAX_CHAINS = len(PDB_CHAIN_IDS)
 assert(PDB_MAX_CHAINS == 62)
+
+_TEMP_DIR_OVERRIDE: Optional[str] = None
+
+
+def set_temp_dir(temp_dir: Optional[str]) -> None:
+    """Allow callers (e.g. `run_fold`) to override the default temp directory."""
+
+    global _TEMP_DIR_OVERRIDE
+    _TEMP_DIR_OVERRIDE = temp_dir
+
+
+class _ModelChainSelect(Select):
+    """Select helper that keeps only a specific model/chain pair."""
+
+    def __init__(self, model_id: int, chain_id: str):
+        super().__init__()
+        self._model_id = model_id
+        self._chain_id = str(chain_id)
+
+    def accept_model(self, model):
+        return model.id == self._model_id
+
+    def accept_chain(self, chain):
+        return str(chain.id) == self._chain_id
+
+
+def _ensure_temp_dir(temp_dir: Optional[str] = None) -> str:
+    """Resolve and create the temp directory used by structure utilities."""
+    candidate = temp_dir or _TEMP_DIR_OVERRIDE
+    if not candidate:
+        candidate = os.path.join(tempfile.gettempdir(), "AbCVista")
+    os.makedirs(candidate, exist_ok=True)
+    return candidate
+
+
+def _get_parser_by_extension(ext: str):
+    ext = ext.lower()
+    if ext in {".cif", ".mmcif"}:
+        return MMCIFParser(QUIET=True)
+    return PDBParser(QUIET=True)
+
+
+def _get_io_by_extension(ext: str):
+    ext = ext.lower()
+    if ext in {".cif", ".mmcif"}:
+        return MMCIFIO()
+    return PDBIO()
+
+
+def split_fasta(
+    fasta_path: str, *, temp_dir: Optional[str] = None
+) -> List[Tuple[str, str]]:
+    """Split a multi-chain FASTA into per-chain FASTA files.
+
+    Args:
+        fasta_path: Path to the input FASTA file.
+        temp_dir: Optional override for the temporary directory.
+    Returns:
+        List of tuples ``(chain_id, fasta_path)`` ordered by chain. Inputs
+        containing a single chain return a one-element list where the FASTA
+        corresponds to the original file's lone chain.
+    """
+    with open(fasta_path, "r") as fh:
+        lines = fh.read().splitlines()
+    entries = []
+    current_header = None
+    current_seq = []
+    for line in lines:
+        if line.startswith(">"):
+            if current_header is not None:
+                entries.append((current_header, "".join(current_seq)))
+            current_header = line[1:].strip()
+            current_seq = []
+        else:
+            current_seq.append(line.strip())
+    if current_header is not None:
+        entries.append((current_header, "".join(current_seq)))
+    if not entries:
+        return []
+    if len(entries) == 1:
+        return [(entries[0][0], fasta_path)]
+    output_paths = []
+    temp_dir = _ensure_temp_dir(temp_dir)
+
+    for header, seq in entries:
+        fd, fasta_path = tempfile.mkstemp(
+            prefix=f"split_{header}_", suffix=".fasta", dir=temp_dir
+        )
+        with os.fdopen(fd, "w") as fh:
+            fh.write(f">{header}\n{seq}\n")
+        output_paths.append((header, fasta_path))
+
+    return output_paths
+
+
+def split_structure_by_chain(
+    file_path: str, *, temp_dir: Optional[str] = None
+) -> List[Tuple[str, str]]:
+    """Split a structure into per-chain files alongside per-chain FASTA.
+
+    Args:
+        file_path: Path to the structure file (.pdb, .cif, .mmcif).
+        temp_dir: Optional override for the temporary directory.
+
+    Returns:
+        List of tuples ``(structure_path, fasta_path)`` ordered by chain. Inputs
+        containing a single chain return a one-element list where the FASTA
+        corresponds to the original file's lone chain.
+    """
+
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"Structure file not found: {file_path}")
+
+    ext = os.path.splitext(file_path)[1].lower()
+    parser = _get_parser_by_extension(ext)
+    structure_id = os.path.splitext(os.path.basename(file_path))[0]
+    structure = parser.get_structure(structure_id, file_path)
+    models = list(structure.get_models())
+    if not models:
+        return []
+
+    model = models[0]
+    chains = list(model.get_chains())
+    output_paths: List[Tuple[str, str]] = []
+    temp_dir = _ensure_temp_dir(temp_dir)
+    suffix = ext if ext else ".pdb"
+    multi_chain = len(chains) > 1
+
+    for chain in chains:
+        chain_id = str(chain.id) if str(chain.id) else "chain"
+
+        if multi_chain:
+            fd, structure_path = tempfile.mkstemp(
+                prefix=f"split_{chain_id}_", suffix=suffix, dir=temp_dir
+            )
+            os.close(fd)
+            writer = _get_io_by_extension(ext)
+            writer.set_structure(structure)
+            writer.save(structure_path, select=_ModelChainSelect(model.id, chain.id))
+        else:
+            structure_path = file_path
+
+        seq_chars = []
+        for residue in chain.get_residues():
+            het_flag, _, _ = residue.get_id()
+            if het_flag != " ":
+                continue
+            resname = residue.get_resname().upper()
+            seq_chars.append(residue_constants.restype_3to1.get(resname, "X"))
+        fasta_seq = "".join(seq_chars)
+
+        fasta_fd, fasta_path = tempfile.mkstemp(
+            prefix=f"split_{chain_id}_", suffix=".fasta", dir=temp_dir
+        )
+        with os.fdopen(fasta_fd, "w") as fh:
+            fh.write(f">{chain_id}\n{fasta_seq}\n")
+
+        output_paths.append((structure_path, fasta_path))
+
+    return output_paths
+
+
+def merge_structure_files(
+    file_paths: Sequence[str],
+    *,
+    output_path: Optional[str] = None,
+    temp_dir: Optional[str] = None,
+) -> str:
+    """Merge multiple structure files into a single output file.
+
+    Args:
+        file_paths: Iterable of structure file paths to merge.
+        output_path: Explicit path for the merged structure; when omitted a name
+            is generated beneath the resolved temporary directory.
+        temp_dir: Optional override for temporary directory used when creating
+            an unnamed output.
+
+    Returns:
+        Path to the merged structure file.
+    """
+
+    if not file_paths:
+        raise ValueError("No structure files provided for merging.")
+
+    paths = list(file_paths)
+    first_path = paths[0]
+    if not os.path.isfile(first_path):
+        raise FileNotFoundError(f"Structure file not found: {first_path}")
+
+    ext = os.path.splitext(first_path)[1].lower()
+    parser = _get_parser_by_extension(ext)
+    base_structure_id = os.path.splitext(os.path.basename(first_path))[0]
+    base_structure = parser.get_structure(base_structure_id, first_path)
+    base_models = list(base_structure.get_models())
+    if not base_models:
+        raise ValueError(f"Structure contains no models: {first_path}")
+
+    merged_structure = copy.deepcopy(base_structure)
+    merged_models = list(merged_structure.get_models())
+    if not merged_models:
+        raise ValueError(f"Could not copy structure models from: {first_path}")
+
+    merged_model = merged_models[0]
+
+    used_chain_ids = {str(chain.id) for chain in merged_model.get_chains()}
+
+    for idx, path in enumerate(paths[1:], start=1):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Structure file not found: {path}")
+        if os.path.splitext(path)[1].lower() != ext:
+            raise ValueError("All structure files must share the same extension.")
+
+        structure_id = os.path.splitext(os.path.basename(path))[0]
+        structure = parser.get_structure(structure_id, path)
+        models = list(structure.get_models())
+        if not models:
+            continue
+        for chain in models[0].get_chains():
+            new_chain = copy.deepcopy(chain)
+            candidate_id = str(chain.id)
+            if not candidate_id or candidate_id in used_chain_ids:
+                for fallback_id in PDB_CHAIN_IDS:
+                    if fallback_id not in used_chain_ids:
+                        candidate_id = fallback_id
+                        break
+            if candidate_id in used_chain_ids:
+                raise ValueError("Unable to assign a unique chain ID while merging.")
+            new_chain.id = candidate_id
+            used_chain_ids.add(candidate_id)
+            merged_model.add(new_chain)
+
+    if output_path:
+        suffix = os.path.splitext(output_path)[1].lower()
+        if suffix and suffix != ext:
+            raise ValueError("Output file extension must match input structures.")
+        target_path = os.path.abspath(output_path)
+        parent = os.path.dirname(target_path)
+        if parent and not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+    else:
+        temp_dir = _ensure_temp_dir(temp_dir)
+        suffix = ext if ext else ".pdb"
+        fd, target_path = tempfile.mkstemp(prefix="merge_", suffix=suffix, dir=temp_dir)
+        os.close(fd)
+
+    writer = _get_io_by_extension(ext)
+    writer.set_structure(merged_structure)
+    writer.save(target_path)
+
+    return target_path
 
 
 @dataclasses.dataclass(frozen=True)

@@ -5,6 +5,7 @@ from Bio import PDB
 from Bio.PDB import vectors, PDBIO
 from subprocess import Popen, PIPE
 import random
+from openfold.np.protein import split_structure_by_chain, merge_structure_files, split_fasta
 import time
 
 # 获取当前文件夹的路径
@@ -164,12 +165,44 @@ class AmideBondFixer:
         返回:
             str: 修复后的PDB文件路径。
         """
-        fix_cmd = f"{self.fixer_path} -i {pdb_file} -o {self.file_paths['fixed_pdb']} -s {fasta_file}"
-        p = Popen(fix_cmd, shell=True, stdout=PIPE, stderr=PIPE)
-        info, err = p.communicate()
         
-        if err or "Error" in info.decode('utf-8'):
-            print(f"Error fixing {pdb_file}: {err.decode('utf-8')}")
+        split_results = split_structure_by_chain(pdb_file)
+        split_fas = split_fasta(fasta_file)
+        if len(split_results) != len(split_fas):
+            print("Mismatch between number of chains in PDB and FASTA files.")
+            # cleanup
+            for p_f, f_f in split_results:
+                os.remove(p_f); os.remove(f_f)
+            for entry, f_f in split_fas:
+                os.remove(f_f)
+            return None
+
+        fixed_files = []
+        for i, (t_pdb, b_fas) in enumerate(split_results):
+            t_out = t_pdb.replace(".pdb", "_fixed.pdb")
+            t_fas = split_fas[i][1]
+            fix_cmd = f"{self.fixer_path} -i {t_pdb} -o {t_out} -s {t_fas}"
+            p = Popen(fix_cmd, shell=True, stdout=PIPE, stderr=PIPE)
+            info, err = p.communicate()
+            
+            if not os.path.exists(t_out):
+                print(f"Fixer failed for {t_pdb}: {err.decode('utf-8')}")
+                # cleanup
+                os.remove(t_pdb); os.remove(t_fas); os.remove(b_fas)
+                for f in fixed_files:
+                    os.remove(f)
+                return None
+            # cleanup
+            os.remove(t_pdb); os.remove(t_fas); os.remove(b_fas)
+            fixed_files.append(t_out)
+        
+        merge_structure_files(fixed_files, output_path=self.file_paths["fixed_pdb"])
+        # cleanup
+        for f in fixed_files:
+            os.remove(f)
+        
+        if not os.path.exists(self.file_paths["fixed_pdb"]):
+            print(f"Merging fixed files failed: {self.file_paths['fixed_pdb']} not found.")
             return None
         
         return self.file_paths["fixed_pdb"]
@@ -192,9 +225,9 @@ class AmideBondFixer:
                 full_cmd += f" -m {chain_id} {seq_num} {prev_res_name} {prev_res_name}"
         
         p = Popen(full_cmd, shell=True, stdout=PIPE, stderr=PIPE)
-        _, err = p.communicate()
+        info, err = p.communicate()
         
-        if err:
+        if err or not os.path.exists(self.file_paths["cisrr_pdb"]):
             print(f"Error running CISRR on {pdb_file}: {err.decode('utf-8')}")
             return None
         
