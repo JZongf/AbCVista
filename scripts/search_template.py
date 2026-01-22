@@ -57,7 +57,7 @@ def search(data_dir, antibody_list, args):
         database_path=args.pdb_seqres_database_path,
     )
     
-    max_workers = min(args.cpus // 8, 1)
+    max_workers = max(args.cpus // 8, 1)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for file in search_path_list:
             future = executor.submit(search_template, file, searcher, args.use_precomputed_msas)
