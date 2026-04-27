@@ -600,18 +600,26 @@ class AlphaFold(nn.Module):
                     # Run auxiliary heads
                     outputs.update(self.aux_heads(outputs))
 
-                    # Offload outputs to CPU
-                    outputs = tensor_tree_map(lambda x: x.cpu().to(torch.float32), outputs)
+                    gpu_outputs = outputs
+                    outputs = tensor_tree_map(lambda x: x.cpu().to(torch.float32), gpu_outputs)
+
                     outputs_list.append(outputs)
                     prevs = [None, None, None]
-                    torch.cuda.empty_cache()
+
+                    del feats
+                    del gpu_outputs
+
+                    if next(self.parameters()).is_cuda:
+                        torch.cuda.empty_cache()
                     continue_flag = True
                 else:
                     prevs = [m_1_prev, z_prev, x_prev]
 
+                    del feats
+
                 if not is_final_iter:
-                    del outputs
-                    # prevs = [m_1_prev, z_prev, x_prev]
+                    if 'outputs' in locals():
+                        del outputs
                     del m_1_prev, z_prev, x_prev
                 else:
                     break

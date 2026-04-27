@@ -369,7 +369,7 @@ def interface(args):
     )
     
     for model, output_directory in model_generator:
-        if torch.cuda.is_bf16_supported():
+        if str(args.model_device).startswith("cuda") and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
             model.to(dtype=torch.bfloat16)
 
         cur_tracing_interval = 0
@@ -734,7 +734,9 @@ def interface(args):
                     logger.info(f"Model output written to {output_dict_path}...")
 
                 # Prepare relaxation task (collect only, run later in parallel)
-                if not args.skip_relaxation and int(rank_list[index]) < 5:
+                if not args.skip_relaxation and (
+                    args.relax_all_predictions or int(rank_list[index]) < 5
+                ):
                     # Save protein to a temporary pickle for relaxation
                     temp_pkl_dir = os.path.join(args.output_dir, "temp_relax_pkl")
                     if not os.path.exists(temp_pkl_dir):
@@ -811,7 +813,8 @@ def interface(args):
             original_msa = None
             del feature_dict, processed_feature_dict, outputs_list, original_msa
             gc.collect()
-            torch.cuda.empty_cache()
+            if str(args.model_device).startswith("cuda") and torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 
 def main(args):
@@ -955,6 +958,12 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="If True, the relaxation process is skipped, otherwise the first five structures will be relaxed.",
+    )
+    parser.add_argument(
+        "--relax_all_predictions",
+        action="store_true",
+        default=False,
+        help="If True, relax all predicted structures instead of only the first five ranked structures.",
     )
     parser.add_argument(
         "--relax_max_workers",
